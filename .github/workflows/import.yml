@@ -1,0 +1,53 @@
+name: Import preserved Nucleus history
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/import.yml']
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  import:
+    if: github.repository == 'metalogiclabs/nucleus' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import the verified source and its history
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/nucleus-source"
+          git clone --single-branch --branch research/nucleus-standalone-20261126 https://github.com/heathsanchez/test.git "$source_dir"
+          test "$(git -C "$source_dir" rev-parse HEAD)" = b4634b8a54cded75844b17e138ebdb3fcb5885d1
+          test "$(git -C "$source_dir" rev-parse HEAD:src)" = 362242c265ee2b1758645c78ad141ad78bf6f8c2
+          test "$(git -C "$source_dir" rev-list --count 3b6c43d90e46d453d75d7e7b643fa168814372b9)" = 720
+          cmp .github/workflows/ci.yml "$source_dir/.github/workflows/ci.yml"
+          cp .github/workflows/import.yml "$source_dir/.github/workflows/import.yml"
+          python3 "$source_dir/scripts/verify_source_import.py"
+          git -C "$source_dir" branch -M main
+          git -C "$source_dir" tag source-import-2026-11-26 3b6c43d90e46d453d75d7e7b643fa168814372b9
+          git -C "$source_dir" config user.name 'github-actions[bot]'
+          git -C "$source_dir" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$source_dir" add .github/workflows/import.yml
+          git -C "$source_dir" commit -m 'Establish Nucleus in the Metalogic Labs organization'
+          gh auth setup-git
+          git -C "$source_dir" remote set-url origin https://github.com/metalogiclabs/nucleus.git
+          git -C "$source_dir" push --force-with-lease="refs/heads/main:$GITHUB_SHA" origin HEAD:refs/heads/main
+          git -C "$source_dir" push origin refs/tags/source-import-2026-11-26
+          git -C "$source_dir" rev-parse HEAD > "$RUNNER_TEMP/nucleus-import-head.txt"
+          git -C "$source_dir" rev-parse HEAD:src > "$RUNNER_TEMP/nucleus-import-src.txt"
+          gh workflow run ci.yml --ref main --repo metalogiclabs/nucleus
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-organization-import
+          path: |
+            ${{ runner.temp }}/nucleus-import-head.txt
+            ${{ runner.temp }}/nucleus-import-src.txt
+          if-no-files-found: warn
+          retention-days: 90
