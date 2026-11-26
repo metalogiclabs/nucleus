@@ -124,9 +124,9 @@ See [contribution guidance](CONTRIBUTING.md).
 | `src/` | Rust parser, typing, conversion and inductive checks |
 | `arena.py`, `arena-flags.json` | Frozen public launch configuration |
 | `tests/`, `tests_py/` | Regression tests and fixtures |
-| `evidence/` | Historical research records and import identity |
+| `evidence/` | Qualification receipts, reference controls and regression inputs |
 | `formal/` | Limited, explicitly scoped Lean semantics model |
-| `scripts/` | Qualification and research tools; historical dependencies are documented |
+| `scripts/` | Build, regression and qualification tools |
 
 Nucleus is separate from [MathGraph Flash](https://github.com/metalogiclabs/mathgraph-lean-kernel),
 the sokonanoda-derived implementation evaluated on the main Arena. Lean 4,

@@ -1,48 +1,46 @@
-# Qualification and limits
+# Qualification
 
-## Frozen source qualification
+The results below describe specific source, configuration and input sets.
+They establish bounded test behavior, rather than universal soundness or
+complete Lean support.
 
-The original [source run](https://github.com/heathsanchez/test/actions/runs/45681083460)
-qualified commit `578697991a903ab78d344aa71165d465bef3c3d7` with Rust 1.99.1
-and the frozen launch configuration now checked in as `arena-flags.json`.
+## Runtime identity and regression checks
 
-Its source `src/` tree is `362242c265ee2b1758645c78ad141ad78bf6f8c2`.
-The beta input manifest came from revision
-`ac0765f269b3cb5d4ed3744301aa59f4ee67ad10` of the preview Arena.
+The qualified Rust source tree is
+`362242c265ee2b1758645c78ad141ad78bf6f8c2`. The
+[identity manifest](../evidence/source-import-20261126.json) binds all 28
+runtime files to the original qualified snapshot.
 
-| Executed scope | ACCEPT | REJECT | UNKNOWN |
+[CI](https://github.com/metalogiclabs/nucleus/actions/workflows/ci.yml)
+checks that identity, runs the Rust and Python regression suites, builds the
+locked release configuration, and exercises the public launcher.
+
+```sh
+python3 scripts/verify_source_import.py
+python3 scripts/test.py
+python3 -m unittest discover -s tests_py
+```
+
+The Rust test runner supplies the three capability flags and stack allowance
+used in the source qualification. The public launcher uses the separately
+frozen `arena-flags.json` configuration.
+
+## Frozen input verification
+
+| Scope | ACCEPT | REJECT | UNKNOWN |
 | --- | ---: | ---: | ---: |
 | 356 downloadable beta inputs | 59 | 51 | 246 |
 | 138 format-3.2.0 inputs, included above | 29 | 34 | 75 |
-| Separate 212-input frozen legacy replay | 122 | 84 | 6 |
+| Separate 212-input legacy replay | 122 | 84 | 6 |
 
-The source qualification observed no incorrect decisive results or crashes,
-and preserved all 212 legacy verdicts. These scopes overlap and their totals
-must not be added. Inputs above the generic 10 MiB allowance are declined;
-large-input declines are not successful proof checks.
+These scopes overlap and their totals must not be added. The
+[original qualification](https://github.com/heathsanchez/test/actions/runs/45681083460)
+observed no incorrect decisive results or crashes. The standalone-layout
+replay preserved all 356 raw exit codes, with per-input identities recorded
+in the [migration receipt](../evidence/standalone-migration-20261126.json).
 
-## Official preview qualification
-
-[Arena PR #3](https://github.com/leanprover/lean-kernel-arena-beta/pull/3) was
-merged with the same pinned source and configuration.
-
-The [official PR run](https://github.com/leanprover/lean-kernel-arena-beta/actions/runs/45682758925)
-reported 364 result rows: 110 correct prescribed decisions, three permitted
-policy-case decisions and 251 declines, with no incorrect results, crashes
-or timeouts. Its 138 renovation outcomes were 29 ACCEPT, 34 REJECT and
-75 DECLINE. The PR workflow omitted `init`, `std` and
-`perf/gf3-matrix-product`; policy cases and omissions differ from the source
-qualification above.
-
-## Standalone migration
-
-The initial extraction preserves the original implementation, launcher,
-configuration and build manifests. The import identity check compares their
-bytes against the qualified source.
-
-The migration replay takes the original qualification artifact, verifies its
-SHA-256 and ZIP CRCs, verifies each input's SHA-256, and requires all 356 raw
-exit codes to match their recorded outcomes.
+To reproduce the standalone replay, obtain the original
+`nucleus-beta-entry-evidence` artifact, ID `15053582604`, and run:
 
 ```sh
 python3 scripts/replay_recorded_beta.py \
@@ -50,51 +48,30 @@ python3 scripts/replay_recorded_beta.py \
   --out /tmp/nucleus-migration-replay.json
 ```
 
-Original artifact: `nucleus-beta-entry-evidence`, ID `15053582604`.
+The harness verifies the artifact SHA-256, ZIP CRCs, every input SHA-256 and
+every recorded raw exit code. Expected archive SHA-256:
 
 ```text
-SHA-256 d8a2cb8b5c92bb14dea63fb019086e6c7f8a6b6183d804681f53a50fb8c145ee
+d8a2cb8b5c92bb14dea63fb019086e6c7f8a6b6183d804681f53a50fb8c145ee
 ```
 
-The standalone build, tests and exact-input replay passed in [qualification run](https://github.com/heathsanchez/test/actions/runs/45732099858):
+## Official Arena qualification
 
-- 358 Rust tests and 29 Python tests passed; 17 Rust tests remained ignored.
-- The original release build and public launcher passed.
-- All 356 exact beta inputs preserved their raw exit codes: 59 ACCEPT, 51 REJECT, 246 UNKNOWN.
-- All 138 renovation outcomes were preserved: 29 ACCEPT, 34 REJECT, 75 UNKNOWN.
-- The 28 runtime files and the 720-commit source extraction matched their recorded identities.
+The [source-relocation qualification](https://github.com/leanprover/lean-kernel-arena-beta/actions/runs/45738423426)
+passed all five jobs. Its 364 result rows contain 110 correct prescribed
+decisions, three permitted policy decisions and 251 declines, with zero
+incorrect results, errors or timeouts. The results archive was independently
+SHA-256 and CRC verified.
 
-The qualification run's final Git publication step was blocked by its job token's workflow-file permissions. The complete prepared commit was then published to the source branch through the repository connection. The subsequent [normal standalone CI run](https://github.com/heathsanchez/test/actions/runs/45732408667) passed every step, including the Rust tests, Python tests, release build and public launcher.
+The Arena's CI omissions and policy cases differ from the frozen input sets
+above; their counts must not be added.
 
-Per-input results are recorded in [the migration receipt](../evidence/standalone-migration-20261126.json). The separate 212-input legacy qualification remains inherited from the original source run; it is not counted as a new standalone replay.
+## Supported boundary
 
-## Metalogic Labs publication
+Inputs larger than 10 MiB are declined by the generic allowance. Unsupported
+declarations and conversions return UNKNOWN. Large-input declines are not
+successful proof checks, and full Mathlib acceptance is not established.
 
-The canonical source is now [metalogiclabs/nucleus](https://github.com/metalogiclabs/nucleus).
-The [organization import](https://github.com/metalogiclabs/nucleus/actions/runs/45737907331)
-preserved all 720 historical source commits and published the import tag.
-
-[Organization CI](https://github.com/metalogiclabs/nucleus/actions/runs/45737943556)
-passed the runtime identity check, 358 Rust tests, 29 Python tests, the release
-build and the public launcher. The 17 inherited ignored Rust tests remain
-outside that executed count. All 28 runtime files retain their qualified
-hashes. The 356-input migration replay above remains the exact-input evidence;
-these CI runs do not add another 356 independent cases.
-
-## What the evidence establishes
-
-The [initial migration attempt](https://github.com/heathsanchez/test/actions/runs/45731878394)
-stopped at a Rust proof-relevance regression because the standalone test setup
-omitted three capability flags from the original qualification workflow.
-`scripts/test.py` restores that exact test configuration and clears inherited
-checker flags. The runtime implementation and its frozen launch configuration
-remain bound to the original import manifest.
-
-The results establish the reported behavior on the exact tested inputs,
-source and configuration. They do not establish universal soundness, general
-format-3.2.0 completeness or full Mathlib acceptance. The abstract Lean model
-under `formal/` also does not establish refinement of the Rust implementation.
-
-UNKNOWN is an explicit unresolved result. A future change that admits a new
-case needs an explanation of the authorizing source rule, adversarial
-controls and regression evidence.
+The abstract Lean model under `formal/` establishes limited environment laws
+under explicit typing assumptions. It does not establish refinement or
+soundness of the Rust implementation.

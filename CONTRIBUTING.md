@@ -4,40 +4,31 @@ Small reproductions and narrowly scoped changes are welcome.
 
 ## Reporting a checker result
 
-Include the exact Nucleus commit, Rust version, launch command, input format,
-raw exit code and stderr. Supply the smallest export that demonstrates the
-behavior, together with its SHA-256 hash and the expected typing or reduction
-rule. Distinguish an incorrect decision from an unsupported input or timeout.
+Include the Nucleus commit, Rust version, launch command, export format,
+input SHA-256, raw exit code and stderr. Supply the smallest export that
+demonstrates the behavior and explain the expected typing or reduction rule.
+Distinguish an incorrect decision from an unsupported input or timeout.
 
-Avoid changing expected outcomes simply to make a test pass. If the intended
-semantics are unresolved, preserve the case as UNKNOWN and describe the open
-obligation.
+## Testing changes
 
-## Changing the checker
+```sh
+python3 scripts/verify_source_import.py
+python3 scripts/test.py
+python3 -m unittest discover -s tests_py
+```
 
-1. Reduce the failing or declined input to a consequential regression case.
-2. Explain the source typing or conversion rule that authorizes the change.
-3. Add a positive control and an adversarial variant when a new admission
-   rule could also admit an invalid export.
-4. Run the Rust and Python checks described in the README. Replay the relevant
-   frozen corpus before claiming that established decisions are preserved.
-5. Record input identity, configuration and the exact verification boundary.
+A new admission rule should include a positive case and an adversarial
+variant. Preserve existing decisive results, and retain UNKNOWN where a
+required check remains unresolved. Do not change expected outcomes merely
+to make a test pass.
 
-The initial `evidence/source-import-20261126.json` manifest deliberately binds
-the runtime to its qualified source snapshot. A future implementation change
-must update that baseline with corresponding qualification evidence.
+The runtime identity manifest binds the current implementation to its
+qualified snapshot. A deliberate runtime change needs corresponding
+qualification evidence and an explicit baseline update.
 
 Runtime decisions must not depend on fixture names, known input hashes,
-expected test outcomes or calls to a competing checker. These may be used by
-external qualification tools to bind evidence to inputs.
+expected test outcomes or calls to another checker. External qualification
+tools may use input names and hashes to bind results to test data.
 
-## Historical experiments
-
-The source import retains earlier experiments and negative results. Some
-historical scripts reference the original research repository's sibling
-directories or Actions artifacts. Those dependencies remain documented in
-[source provenance](docs/PROVENANCE.md); they are not required to build or run
-Nucleus.
-
-This project is experimental. A passing test suite establishes its recorded
-test boundary, not universal soundness or complete Lean support.
+See [qualification](docs/QUALIFICATION.md) for the executed input sets and
+verification boundaries.

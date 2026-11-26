@@ -1,2 +1,11 @@
 /target/
 __pycache__/
+
+# Local development notes and generated measurements
+/notes/
+/internal/
+/scratch/
+/*_MISSION.md
+/*_INTERNAL.md
+/evidence/runs/
+/evidence/performance/
