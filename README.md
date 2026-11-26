@@ -10,6 +10,9 @@
 
 **An independent Rust proof checker for Lean 4 exports.**
 
+[![CI](https://github.com/metalogiclabs/nucleus/actions/workflows/ci.yml/badge.svg)](https://github.com/metalogiclabs/nucleus/actions/workflows/ci.yml)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Nucleus checks serialized declarations against its own implementation of
 Lean's typing and conversion rules. It returns an explicit **UNKNOWN** when
 the input exceeds its supported fragment or resource allowance. Developed by

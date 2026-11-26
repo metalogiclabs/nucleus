@@ -68,6 +68,19 @@ The qualification run's final Git publication step was blocked by its job token'
 
 Per-input results are recorded in [the migration receipt](../evidence/standalone-migration-20261126.json). The separate 212-input legacy qualification remains inherited from the original source run; it is not counted as a new standalone replay.
 
+## Metalogic Labs publication
+
+The canonical source is now [metalogiclabs/nucleus](https://github.com/metalogiclabs/nucleus).
+The [organization import](https://github.com/metalogiclabs/nucleus/actions/runs/45737907331)
+preserved all 720 historical source commits and published the import tag.
+
+[Organization CI](https://github.com/metalogiclabs/nucleus/actions/runs/45737943556)
+passed the runtime identity check, 358 Rust tests, 29 Python tests, the release
+build and the public launcher. The 17 inherited ignored Rust tests remain
+outside that executed count. All 28 runtime files retain their qualified
+hashes. The 356-input migration replay above remains the exact-input evidence;
+these CI runs do not add another 356 independent cases.
+
 ## What the evidence establishes
 
 The [initial migration attempt](https://github.com/heathsanchez/test/actions/runs/45731878394)

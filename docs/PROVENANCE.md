@@ -1,5 +1,7 @@
 # Source provenance
 
+Canonical source: [metalogiclabs/nucleus](https://github.com/metalogiclabs/nucleus).
+
 The standalone repository extracts Nucleus's existing implementation from
 `heathsanchez/test`. It retains 720 commits of subtree history, including
 earlier experiments and negative results.
@@ -57,6 +59,12 @@ They are not needed for the documented standalone build, runtime or regression
 suite. Use `scripts/replay_recorded_beta.py` for the standalone migration
 qualification.
 
-The current Arena descriptor remains pinned to the original source until the
-new repository has been published and qualified. A source-location update
-must retain its configuration and explicit capability limits.
+The original Arena descriptor pins the historical research snapshot. Its
+relocation to this repository changes the source URL, revision and root-level
+build/run paths while retaining the frozen configuration and capability limits.
+
+The [organization import](https://github.com/metalogiclabs/nucleus/actions/runs/45737907331)
+preserved the source history and published the import tag. The subsequent
+[organization CI](https://github.com/metalogiclabs/nucleus/actions/runs/45737943556)
+passed the runtime identity check, Rust and Python tests, release build and
+public launcher.
