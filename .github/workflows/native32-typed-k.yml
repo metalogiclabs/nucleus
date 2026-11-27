@@ -1,0 +1,242 @@
+name: Native 3.2 typed K and indexed iota separation
+on:
+  push:
+    branches: [research/native32-typed-k-20261127]
+    paths: ['.github/workflows/native32-typed-k.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Verify exact qualified base and oracle cohort
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          git merge-base --is-ancestor fb903a3b61ce2b42349eb02648f11514569c2af6 HEAD
+          git diff --exit-code fb903a3b61ce2b42349eb02648f11514569c2af6 HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          test "$(git rev-parse HEAD:src)" = 49ea54e287da5d66c757fac43414dc69634da868
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15182470435/zip > evidence-run/base.zip
+          printf '%s  %s\n' 72b3db6e2d59d4025fcfbc8e140b5dfa9d057cb206c4cc6625b4740ee8e2698b evidence-run/base.zip | sha256sum -c -
+          cargo build --locked --release --features diagnostics
+          cp target/release/metatron-kernel "$RUNNER_TEMP/baseline"
+          sha256sum "$RUNNER_TEMP/baseline" > evidence-run/baseline.sha256
+      - name: Install only fully reconstructed indexed computation certificate
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation/nullary/parametric.rs');s=p.read_text()
+          old=r'''    // Do not install a reduction certificate. This experiment
+              // tests only the checked opaque indexed signatures.
+              Some(CertifiedFamily{signatures:vec![
+                  signature(ind,OpaqueInductiveKind::Type)?,
+                  signature(ctor,OpaqueInductiveKind::Constructor)?,
+                  signature(rec,OpaqueInductiveKind::Recursor)?],reduction:None})'''
+          # Source alignment is exact, not a semantic fallback.
+          import textwrap
+          old='    // Do not install a reduction certificate. This experiment\n    // tests only the checked opaque indexed signatures.\n    Some(CertifiedFamily{signatures:vec![\n        signature(ind,OpaqueInductiveKind::Type)?,\n        signature(ctor,OpaqueInductiveKind::Constructor)?,\n        signature(rec,OpaqueInductiveKind::Recursor)?],reduction:None})'
+          assert s.count(old)==1,(old,s.count(old))
+          new=r'''// All indexed identity claims were reconstructed above, including
+          // the constructor result, exact index telescope, flags and rule RHS.
+          // Reuse the independently implemented typed K boundary, which
+          // compares the replacement constructor type with the major domain.
+          // No rule is inferred from a declaration name or K bit alone.
+          let name=|n:usize|u64::try_from(n).ok().map(NameId);
+          let reduction=crate::machine::RecursorReduction{
+              k:false,num_params:2,num_indices:1,
+              level_params:rps.iter().copied().map(name).collect::<Option<Vec<_>>>()?,
+              rules:vec![crate::machine::RecursorRule{
+                  constructor:name(c)?,
+                  constructor_level_params:ps.iter().copied().map(name).collect::<Option<Vec<_>>>()?,
+                  num_params:2,num_fields:0,
+                  rhs:ExprId(u64::try_from(num(rule,"rhs")?).ok()?),
+              }],
+          };
+          Some(CertifiedFamily{signatures:vec![
+              signature(ind,OpaqueInductiveKind::Type)?,
+              signature(ctor,OpaqueInductiveKind::Constructor)?,
+              signature(rec,OpaqueInductiveKind::Recursor)?],
+              reduction:Some((name(r)?,reduction))})'''
+          new=textwrap.indent(new,'    ')
+          p.write_text(s.replace(old,new))
+          PY
+          cargo build --locked --release --features diagnostics
+          cp target/release/metatron-kernel "$RUNNER_TEMP/indexed-iota-only"
+          git diff -- src > evidence-run/indexed-iota-only.patch
+          sha256sum "$RUNNER_TEMP/indexed-iota-only" > evidence-run/indexed-iota-only.sha256
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation/nullary/parametric.rs');s=p.read_text()
+          old='k:false,num_params:2,num_indices:1,'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'k:true,num_params:2,num_indices:1,'))
+          PY
+          git diff --exit-code -- . ':!src/renovation/nullary/parametric.rs'
+          git diff -- src > evidence-run/typed-k.patch
+          git add src
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          python3 scripts/test.py
+          python3 -m unittest discover -s tests_py
+          cargo build --locked --release --features diagnostics
+          sha256sum target/release/metatron-kernel arena.py arena-flags.json > evidence-run/binary.sha256
+      - name: Replay authentic K pair, reduction ablation and preserved inputs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,copy,hashlib,io,json,os,pathlib,subprocess,tarfile,zipfile
+          p=pathlib.Path('evidence-run');z=zipfile.ZipFile(p/'base.zip');assert z.testzip() is None
+          b=zipfile.ZipFile(io.BytesIO(z.read('base.zip')));assert hashlib.sha256(z.read('base.zip')).hexdigest()=='904f723417fae29ee959e89d335bfa9c93934fc38f5846013c09a4cdfa99ce61'
+          c=zipfile.ZipFile(io.BytesIO(b.read('composition.zip')));o=zipfile.ZipFile(io.BytesIO(c.read('base.zip')))
+          def inputs(raw):
+              zz=zipfile.ZipFile(io.BytesIO(raw));assert zz.testzip() is None
+              t=tarfile.open(fileobj=io.BytesIO(zz.read('lean-arena-tests.tar.gz')))
+              return {m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          current=inputs(o.read('test-tarball.zip'))
+          oldzip=zipfile.ZipFile(io.BytesIO(o.read('prior-qualification.zip')));assert oldzip.testzip() is None
+          prior=inputs(oldzip.read('tarball.zip'))
+          def digest(raw):return hashlib.sha256(raw).hexdigest()
+          def serial(rows):return b''.join(json.dumps(r,separators=(',',':')).encode()+b'\n' for r in rows)
+          flags=json.loads(pathlib.Path('arena-flags.json').read_text())
+          def run(raw,mode='candidate',trace=False):
+              if mode=='candidate' and not trace:
+                  q=subprocess.run(['python3','arena.py'],input=raw,capture_output=True,timeout=120)
+              else:
+                  env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))}
+                  env.update(flags)
+                  if trace:env['NUCLEUS_TRACE_RULE_K']='1'
+                  exe=pathlib.Path('target/release/metatron-kernel').resolve() if mode=='candidate' else pathlib.Path(os.environ['RUNNER_TEMP'])/mode
+                  q=subprocess.run([str(exe)],input=raw,capture_output=True,env=env,timeout=120)
+              return q.returncode,q.stderr.decode(errors='replace')
+          baseline={r['name']:r for r in json.loads(z.read('current-rows.json'))}
+          d=p/'witnesses';d.mkdir()
+          witnesses=[]
+          # Only exact authentic K pair isolates K. The partial eta case and
+          # singleton/recursive examples are observations, not required gains.
+          targets=['tutorial/099_ruleK','tutorial/100_ruleKbad','renovation/129_etaRuleK','tutorial/075_typeSingletonRecReduction','renovation/041_kEqK']
+          for n in targets:
+              raw=current[n];r=baseline[n];assert digest(raw)==r['sha256']
+              a,ae=run(raw,'baseline');i,ie=run(raw,'indexed-iota-only',True);k,ke=run(raw,'candidate',True)
+              assert a==r['exit']
+              row={'name':n,'sha256':digest(raw),'expected':r['expected'],'baseline':a,'iota_only':i,'typed_k':k,'iota_trace':ie,'k_trace':ke}
+              witnesses.append(row);(d/(n.rsplit('/',1)[1]+'.ndjson')).write_bytes(raw)
+              print('WITNESS '+json.dumps({k:v for k,v in row.items() if not k.endswith('trace')}),flush=True)
+          (p/'witnesses.json').write_text(json.dumps(witnesses,indent=2)+'\n')
+          # Construct a concrete-constructor separator from the exact
+          # original K pair. The source family and native header are
+          # unchanged. Replace only the major at the recursor call; clone
+          # its dependent ancestors with fresh consecutive expression IDs.
+          # A forged true=false application must never be admitted.
+          controls=[]
+          def concrete(raw):
+              rows=[json.loads(l) for l in raw.splitlines()];expr={r['ie']:r for r in rows if 'ie' in r};thm=rows.pop()['thm']
+              assert thm['type']==77 and thm['value']==82
+              assert expr[73]['app']=={'fn':72,'arg':2}
+              assert expr[79]['app']=={'fn':78,'arg':43}
+              assert expr[78]['const']=={'name':9,'us':[3]}
+              assert expr[47]['const']=={'name':17,'us':[]}
+              assert expr[74]['app']=={'fn':61,'arg':73}
+              assert expr[75]['app']=={'fn':74,'arg':1}
+              assert expr[76]['forallE']['body']==75 and expr[77]['forallE']['body']==76
+              idx=max(expr)+1
+              def add(r):
+                  nonlocal idx
+                  a=idx;idx+=1;rows.append({'ie':a,**r});return a
+              v=add({'app':{'fn':79,'arg':47}})
+              v=add({'app':{'fn':72,'arg':v}})
+              v=add({'app':{'fn':61,'arg':v}})
+              v=add({'app':{'fn':v,'arg':1}})
+              v=add({'forallE':{**expr[76]['forallE'],'body':v}})
+              v=add({'forallE':{**expr[77]['forallE'],'body':v}})
+              return serial(rows+[{'thm':{**thm,'type':v}}])
+          def record(name,raw,expected,all_modes=True):
+              a,_=run(raw,'baseline');i,ie=run(raw,'indexed-iota-only',True);k,ke=run(raw,'candidate',True)
+              row={'name':name,'sha256':digest(raw),'expected':expected,'baseline':a,'iota_only':i,'typed_k':k,'iota_trace':ie,'k_trace':ke}
+              controls.append(row);(d/(name+'.ndjson')).write_bytes(raw)
+              print('CONTROL '+json.dumps({k:v for k,v in row.items() if not k.endswith('trace')}),flush=True)
+          record('constructor-major-good',concrete(current[targets[0]]),0)
+          record('constructor-major-wrong-index',concrete(current[targets[1]]),1)
+          source=[json.loads(l) for l in current[targets[0]].splitlines()]
+          at=next(i for i,r in enumerate(source) if 'inductive' in r)
+          def mutated(f):
+              r=copy.deepcopy(source);f(r[at]['inductive']);return serial(r)
+          for name,f in [
+              ('withdraw-k',lambda q:(q['types'][0].update(isK=False),q['recs'][0].update(k=False))),
+              ('forged-rhs',lambda q:q['recs'][0]['rules'][0].update(rhs=q['ctors'][0]['type'])),
+              ('wrong-index-metadata',lambda q:q['recs'][0].update(numIndices=0)),
+              ('wrong-ctor',lambda q:q['recs'][0]['rules'][0].update(ctor=q['types'][0]['name']))]:
+              record(name,mutated(f),1)
+          (p/'controls.json').write_text(json.dumps(controls,indent=2)+'\n')
+          # Exact separate current/prior cohorts; all previous decisive
+          # results preserved, only expected correct UNKNOWN recoveries.
+          for cohort,ins in [('current',current),('prior',prior)]:
+              before={r['name']:r for r in json.loads(z.read(cohort+'-rows.json'))}
+              assert len(ins)==356 and set(ins)==set(before)
+              rows=[]
+              for n,raw in ins.items():
+                  r=before[n];assert digest(raw)==r['sha256']
+                  code,err=run(raw);rows.append({'name':n,'sha256':r['sha256'],'format':r['format'],'expected':r['expected'],'before':r['exit'],'exit':code,'stderr':err})
+              changes=[r for r in rows if r['before']!=r['exit']]
+              summary={'cohort':cohort,'counts':dict(collections.Counter(r['exit'] for r in rows)),'changed':changes,'input_count':len(rows)}
+              (p/(cohort+'-rows.json')).write_text(json.dumps(rows,indent=2)+'\n')
+              (p/(cohort+'-summary.json')).write_text(json.dumps(summary,indent=2)+'\n')
+              print('SUMMARY '+json.dumps(summary),flush=True)
+          # Retain exact earlier fixture bytes and raw exits, including
+          # wrong-rule and false-equality UNKNOWNs. Improvements to rejection
+          # need independent authorization, not just a convenient new exit.
+          protected=[]
+          for r in json.loads(z.read('controls.json')):
+              raw=z.read('controls/'+r['name']+'.ndjson');assert digest(raw)==r['sha256']
+              code,err=run(raw);protected.append({'name':'identity/'+r['name'],'before':r['exit'],'exit':code,'sha256':digest(raw),'stderr':err})
+          for r in json.loads(b.read('native-ab.json')):
+              raw=b.read('native/'+r['name']+'.ndjson');assert digest(raw)==r['sha256']
+              code,err=run(raw);protected.append({'name':'iota/'+r['name'],'before':r['after'],'exit':code,'sha256':digest(raw),'stderr':err})
+          for r in json.loads(b.read('iota-controls.json')):
+              raw=b.read('native/mut-'+r['name']+'.ndjson');assert digest(raw)==r['sha256']
+              code,err=run(raw);protected.append({'name':'iota/mut-'+r['name'],'before':r['exit'],'exit':code,'sha256':digest(raw),'stderr':err})
+          for r in json.loads(o.read('new-regressions.json')):
+              raw=o.read('new-inputs/'+r['case']);assert digest(raw)==r['sha256']
+              code,err=run(raw);protected.append({'name':'external/'+r['case'],'before':r['exit'],'exit':code,'sha256':digest(raw),'stderr':err})
+          (p/'protected.json').write_text(json.dumps(protected,indent=2)+'\n')
+          PY
+      - name: Enforce actual typed K gains and no false accept
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('evidence-run')
+          w={r['name']:r for r in json.loads((p/'witnesses.json').read_text())}
+          good=w['tutorial/099_ruleK'];bad=w['tutorial/100_ruleKbad']
+          c={r['name']:r for r in json.loads((p/'controls.json').read_text())}
+          assert len(w)==5 and len(c)==6
+          assert (good['baseline'],good['iota_only'],good['typed_k'])==(2,2,0),good
+          assert bad['typed_k'] in (1,2),bad
+          assert c['constructor-major-good']['iota_only']==c['constructor-major-good']['typed_k']==0,c['constructor-major-good']
+          assert all(r['typed_k'] in (1,2) and r['iota_only'] in (1,2) for name,r in c.items() if name!='constructor-major-good'),c
+          for cohort in ('current','prior'):
+              r=json.loads((p/(cohort+'-summary.json')).read_text());assert r['input_count']==356
+              assert all(c['format']=='3.2.0' and c['before']==2 and c['expected']=='accept' and c['exit']==0 for c in r['changed']),r
+          prot=json.loads((p/'protected.json').read_text());assert len(prot)==26 and all(r['before']==r['exit'] for r in prot),prot
+          print('QUALIFIED_TYPED_K '+json.dumps({'witnesses':[(r['name'],r['baseline'],r['iota_only'],r['typed_k']) for r in w.values()],'controls':[(r['name'],r['baseline'],r['iota_only'],r['typed_k']) for r in c.values()]}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-typed-k
+          path: evidence-run/
+          retention-days: 60
