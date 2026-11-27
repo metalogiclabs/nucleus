@@ -1,0 +1,63 @@
+name: Native 3.2 typed K and indexed computation
+on:
+  push:
+    branches: [test/native32-typed-k-20261127]
+    paths: ['.github/workflows/native32-typed-k.yml', '.github/experiments/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Verify exact qualified parent and build baseline
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          git merge-base --is-ancestor fb903a3b61ce2b42349eb02648f11514569c2af6 HEAD
+          git diff --exit-code fb903a3b61ce2b42349eb02648f11514569c2af6 HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          test "$(git rev-parse HEAD:src)" = 49ea54e287da5d66c757fac43414dc69634da868
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15182470435/zip > evidence-run/base.zip
+          cargo build --locked --release --features diagnostics > evidence-run/baseline-build.log 2>&1
+          cp target/release/metatron-kernel evidence-run/baseline
+          sha256sum evidence-run/baseline > evidence-run/baseline-binary.sha256
+      - name: Install exact source candidate and run regressions
+        run: |
+          set -euo pipefail
+          cp .github/experiments/native32-typed-k.patch evidence-run/candidate.patch
+          git apply --index evidence-run/candidate.patch
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src tests/native32_typed_k.rs tests/fixtures/native32-typed-k
+          python3 scripts/test.py > evidence-run/rust-tests.log 2>&1
+          python3 -m unittest discover -s tests_py > evidence-run/python-tests.log 2>&1
+          cargo build --locked --release --features diagnostics > evidence-run/candidate-build.log 2>&1
+          sha256sum target/release/metatron-kernel arena.py arena-flags.json > evidence-run/binary.sha256
+      - name: Install pinned native Lean oracle
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4-pr-releases:pr-release-16595-cb63311
+          "$HOME/.elan/bin/elan" run leanprover/lean4-pr-releases:pr-release-16595-cb63311 lean --version > evidence-run/oracle-version.txt
+      - name: Replay both cohorts and validate indexed K against native Lean
+        run: python3 .github/experiments/qualify-native32-typed-k.py > evidence-run/qualification.log 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-typed-k
+          path: evidence-run/
+          retention-days: 60

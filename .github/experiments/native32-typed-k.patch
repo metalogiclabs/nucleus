@@ -1,0 +1,1660 @@
+diff --git a/src/convert.rs b/src/convert.rs
+index e4da4f2..dcfdad7 100644
+--- a/src/convert.rs
++++ b/src/convert.rs
+@@ -2170,6 +2170,17 @@ fn compare_values(
+                     }
+                     RuleKAttempt::NotApplicable => {}
+                 }
++                if depth == context.len() {
++                    for (source, other) in [(left, right), (right, left)] {
++                        if let Some((reduced, applied, body_context)) =
++                            checker.partial_rule_k_eta_pair(source, other, context, current_budget)
++                        {
++                            work.push((TypeValue::Term(reduced), TypeValue::Term(applied),
++                                depth + 1, body_context));
++                            return Judgment::proven((), "typed-partial-k-eta-opening");
++                        }
++                    }
++                }
+                 if one_neutral_head_is_free(left, right)
+                     && (checker.certified_stuck_nonproof_recursor_on_local(
+                         left,
+diff --git a/src/renovation/nullary/composite.rs b/src/renovation/nullary/composite.rs
+index c542c9a..4289ded 100644
+--- a/src/renovation/nullary/composite.rs
++++ b/src/renovation/nullary/composite.rs
+@@ -2,7 +2,8 @@
+ //! ordinary declarations. Acceptance-only: omitted conversion rules
+ //! cannot justify rejection. No raw inductive enters the legacy
+ //! parser; only reconstructed constructor-specific iota is enabled.
+-//! No eta, projection, K, literal or axiom authority is installed.
++//! Typed K is restricted to the fully reconstructed indexed identity family.
++//! No eta, projection, literal or axiom authority is installed.
+ use super::*;
+ use crate::convert::DeltaPolicy;
+ use crate::environment::{ConstantDecl,Environment};
+diff --git a/src/renovation/nullary/parametric.rs b/src/renovation/nullary/parametric.rs
+index eed4568..8b487e9 100644
+--- a/src/renovation/nullary/parametric.rs
++++ b/src/renovation/nullary/parametric.rs
+@@ -1,4 +1,5 @@
+-//! Source-derived nonrecursive, nonindexed, single-family admission.
++//! Source-derived nonrecursive single-family admission, including the exact
++//! indexed identity family checked below.
+ //! Validate parameter/field dependent typing in the Sort/Pi/Var/App fragment;
+ //! no arbitrary constants or axioms in binder types. Derive every constructor
+ //! result, motive/minor/major telescope, and applicable iota rule from source.
+@@ -292,8 +293,9 @@ fn checked_family_with_prior(t:&Tables,b:&Value,prior:&HashMap<usize,T>)->Option
+ }
+ 
+ // Only successful full reconstruction produces opaque signatures and
+-// constructor-indexed computation authority. K, small elimination
+-// and empty-rule recursors never receive an execution certificate.
++// constructor-indexed computation authority. Small elimination and empty-rule
++// recursors never receive an execution certificate. Indexed K authority is
++// restricted to the fully reconstructed identity family below.
+ pub(super) struct CertifiedFamily {
+     pub(super) signatures:Vec<crate::inductive::DerivedSignature>,
+     pub(super) reduction:Option<(crate::id::NameId,crate::machine::RecursorReduction)>,
+@@ -359,12 +361,26 @@ fn checked_identity(t:&Tables,b:&Value)->Option<CertifiedFamily>{
+             level_params:numbers(row,"levelParams")?.into_iter().map(|n|u64::try_from(n).ok().map(NameId)).collect::<Option<Vec<_>>>()?,
+             ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
+     };
+-    // Do not install a reduction certificate. This experiment
+-    // tests only the checked opaque indexed signatures.
++    // Every source telescope and the complete RHS have now been reconstructed.
++    // Ordinary iota still requires the actual registered constructor. A neutral
++    // major can reduce only through TypeChecker::rule_k_reduce_neutral, which
++    // checks the replacement constructor against the instantiated major domain.
++    // In particular, a proof of identity a b cannot license K at a different b.
++    let name=|n:usize|u64::try_from(n).ok().map(NameId);
++    let reduction=crate::machine::RecursorReduction{
++        k:true,num_params:2,num_indices:1,
++        level_params:rps.iter().copied().map(name).collect::<Option<Vec<_>>>()?,
++        rules:vec![crate::machine::RecursorRule{
++            constructor:name(c)?,
++            constructor_level_params:ps.iter().copied().map(name).collect::<Option<Vec<_>>>()?,
++            num_params:2,num_fields:0,
++            rhs:ExprId(u64::try_from(num(rule,"rhs")?).ok()?),
++        }],
++    };
+     Some(CertifiedFamily{signatures:vec![
+         signature(ind,OpaqueInductiveKind::Type)?,
+         signature(ctor,OpaqueInductiveKind::Constructor)?,
+-        signature(rec,OpaqueInductiveKind::Recursor)?],reduction:None})
++        signature(rec,OpaqueInductiveKind::Recursor)?],reduction:Some((name(r)?,reduction))})
+ }
+ 
+ impl PriorFamilies {
+diff --git a/src/typecheck.rs b/src/typecheck.rs
+index c9e89e8..d3e16e1 100644
+--- a/src/typecheck.rs
++++ b/src/typecheck.rs
+@@ -5752,6 +5752,77 @@ impl<'a> TypeChecker<'a> {
+         )
+     }
+ 
++    /// Open exactly the missing major of a certified partial K recursor.
++    /// Both functions' actual dependent arguments and complete types must be
++    /// checked before the fresh local is introduced. Merely knowing the
++    /// recursor's expected telescope cannot type an arbitrary captured minor.
++    pub(crate) fn partial_rule_k_eta_pair(
++        &self,
++        source: &Neutral,
++        other: &Neutral,
++        context: &[TypeValue],
++        budget: usize,
++    ) -> Option<(Closure, Closure, Vec<TypeValue>)> {
++        if budget < 256 || context.len() >= 24 || other.spine.len() > 16 {
++            return None;
++        }
++        let NeutralHead::Const { name, .. } = &source.head else { return None };
++        let reduction = self.environment.recursor_reduction(*name)?;
++        let [rule] = reduction.rules.as_slice() else { return None };
++        let major = reduction.num_params.checked_add(1)?
++            .checked_add(reduction.rules.len())?.checked_add(reduction.num_indices)?;
++        if !reduction.k || rule.num_fields != 0 || source.spine.len() != major {
++            return None;
++        }
++        let allowance = budget / 4;
++        let checked_type = |neutral: &Neutral| -> Option<TypeValue> {
++            let mut prefix = Neutral { head: neutral.head.clone(), spine: Vec::new() };
++            let mut fuel = allowance;
++            for argument in &neutral.spine {
++                let function = self.neutral_result_type(&prefix, context, fuel)?;
++                let (domain, _) = self.pi_view(
++                    Judgment::proven(function, "partial-k-checked-prefix"), fuel,
++                )?;
++                let actual = self.infer_exact_closure_in_context(argument, context, &mut fuel, 0)?;
++                if !crate::convert::convert_with_policy_in_context(
++                    self, &actual, &domain, fuel.min(allowance), self.delta_policy,
++                    context.len(), context,
++                ).is_proven() { return None; }
++                prefix.spine.push(argument.clone());
++            }
++            self.neutral_result_type(&prefix, context, fuel)
++        };
++        let source_type = checked_type(source)?;
++        let other_type = checked_type(other)?;
++        if !crate::convert::convert_with_policy_in_context(
++            self, &source_type, &other_type, allowance, self.delta_policy,
++            context.len(), context,
++        ).is_proven() { return None; }
++        let (domain, _) = self.pi_view(
++            Judgment::proven(source_type, "partial-k-function-type"), allowance,
++        )?;
++        let fresh = fresh_local(context.len())?;
++        // A captured local with this identity must never be rebound by eta.
++        if self.type_depends_on_free(&domain, fresh, allowance) != Some(false)
++            || source.spine.iter().chain(&other.spine).any(|argument|
++                self.type_depends_on_free(&TypeValue::Term(argument.clone()), fresh, allowance) != Some(false))
++        { return None; }
++        let carrier = self.expressions.iter_raw().find_map(|(id, expression)|
++            matches!(expression, Expr::BVar(0)).then_some(ExprId(id)))?;
++        let argument = Closure::new(carrier, EnvFrame::empty().extend_free(fresh));
++        let mut body_context = context.to_vec();
++        body_context.push(domain);
++        let mut applied_source = source.clone();
++        applied_source.spine.push(argument.clone());
++        let RuleKAttempt::Reduced(reduced) = self.rule_k_reduce_neutral(
++            &applied_source, &body_context, allowance,
++        ) else { return None };
++        let mut applied_other = other.clone();
++        applied_other.spine.push(argument);
++        let rhs = Closure::new(carrier, EnvFrame::empty().extend_neutral(applied_other));
++        Some((reduced, rhs, body_context))
++    }
++
+     pub(crate) fn rule_k_reduce_neutral(
+         &self,
+         neutral: &Neutral,
+diff --git a/tests/fixtures/native32-typed-k/099_ruleK.ndjson b/tests/fixtures/native32-typed-k/099_ruleK.ndjson
+new file mode 100644
+index 0000000..571cf2e
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/099_ruleK.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"α"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleK"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":207580489,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":47,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":77,"value":82}}
+diff --git a/tests/fixtures/native32-typed-k/100_ruleKbad.ndjson b/tests/fixtures/native32-typed-k/100_ruleKbad.ndjson
+new file mode 100644
+index 0000000..596d6c1
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/100_ruleKbad.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"α"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleKbad"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":45,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":3161876795,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":45,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":77,"value":82}}
+diff --git a/tests/fixtures/native32-typed-k/129_etaRuleK.ndjson b/tests/fixtures/native32-typed-k/129_etaRuleK.ndjson
+new file mode 100644
+index 0000000..9b28f87
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/129_etaRuleK.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"α"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"etaRuleK"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"forallE":{"binderInfo":"default","body":43,"name":8,"type":63},"ie":64}
++{"app":{"arg":64,"fn":60},"ie":65}
++{"const":{"name":10,"us":[3,3]},"ie":66}
++{"app":{"arg":43,"fn":66},"ie":67}
++{"app":{"arg":47,"fn":67},"ie":68}
++{"in":22,"str":{"pre":0,"str":"x"}}
++{"in":23,"str":{"pre":22,"str":"_@"}}
++{"in":24,"str":{"pre":23,"str":"Renovation"}}
++{"in":25,"num":{"i":1296921618,"pre":24}}
++{"in":26,"str":{"pre":25,"str":"_hygCtx"}}
++{"in":27,"str":{"pre":26,"str":"_hyg"}}
++{"in":28,"num":{"i":31,"pre":27}}
++{"in":29,"num":{"i":33,"pre":27}}
++{"app":{"arg":1,"fn":62},"ie":69}
++{"ie":70,"lam":{"binderInfo":"default","body":43,"name":29,"type":69}}
++{"ie":71,"lam":{"binderInfo":"default","body":70,"name":28,"type":43}}
++{"app":{"arg":71,"fn":68},"ie":72}
++{"const":{"name":9,"us":[3]},"ie":73}
++{"app":{"arg":43,"fn":73},"ie":74}
++{"app":{"arg":47,"fn":74},"ie":75}
++{"app":{"arg":75,"fn":1},"ie":76}
++{"app":{"arg":76,"fn":72},"ie":77}
++{"app":{"arg":47,"fn":77},"ie":78}
++{"app":{"arg":78,"fn":65},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"forallE":{"binderInfo":"default","body":80,"name":4,"type":64},"ie":81}
++{"app":{"arg":64,"fn":73},"ie":82}
++{"app":{"arg":1,"fn":82},"ie":83}
++{"ie":84,"lam":{"binderInfo":"default","body":83,"name":4,"type":64}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":81,"value":84}}
+diff --git a/tests/fixtures/native32-typed-k/forged-rule.ndjson b/tests/fixtures/native32-typed-k/forged-rule.ndjson
+new file mode 100644
+index 0000000..aa7f7df
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/forged-rule.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":12}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleK"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":207580489,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":47,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":77,"value":82}}
+diff --git a/tests/fixtures/native32-typed-k/indexed-iota-bad.ndjson b/tests/fixtures/native32-typed-k/indexed-iota-bad.ndjson
+new file mode 100644
+index 0000000..955d700
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/indexed-iota-bad.ndjson
+@@ -0,0 +1,140 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleK"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":207580489,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":47,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"in":32,"str":{"pre":0,"str":"indexedIotaGate"}}
++{"ie":83,"const":{"name":9,"us":[3]}}
++{"ie":84,"app":{"fn":83,"arg":43}}
++{"ie":85,"app":{"fn":84,"arg":47}}
++{"ie":86,"const":{"name":10,"us":[3,3]}}
++{"ie":87,"app":{"fn":86,"arg":43}}
++{"ie":88,"app":{"fn":87,"arg":47}}
++{"ie":89,"app":{"fn":88,"arg":69}}
++{"ie":90,"app":{"fn":89,"arg":45}}
++{"ie":91,"app":{"fn":90,"arg":47}}
++{"ie":92,"app":{"fn":91,"arg":85}}
++{"ie":93,"const":{"name":1,"us":[3]}}
++{"ie":94,"app":{"fn":93,"arg":43}}
++{"ie":95,"app":{"fn":94,"arg":92}}
++{"ie":96,"const":{"name":9,"us":[3]}}
++{"ie":97,"app":{"fn":96,"arg":43}}
++{"ie":98,"app":{"fn":97,"arg":45}}
++{"ie":99,"app":{"fn":95,"arg":45}}
++{"ie":100,"app":{"fn":95,"arg":47}}
++{"thm":{"all":[32],"name":32,"levelParams":[],"type":100,"value":98}}
+diff --git a/tests/fixtures/native32-typed-k/indexed-iota-good.ndjson b/tests/fixtures/native32-typed-k/indexed-iota-good.ndjson
+new file mode 100644
+index 0000000..5e5d213
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/indexed-iota-good.ndjson
+@@ -0,0 +1,140 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleK"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":207580489,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":47,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"in":32,"str":{"pre":0,"str":"indexedIotaGate"}}
++{"ie":83,"const":{"name":9,"us":[3]}}
++{"ie":84,"app":{"fn":83,"arg":43}}
++{"ie":85,"app":{"fn":84,"arg":47}}
++{"ie":86,"const":{"name":10,"us":[3,3]}}
++{"ie":87,"app":{"fn":86,"arg":43}}
++{"ie":88,"app":{"fn":87,"arg":47}}
++{"ie":89,"app":{"fn":88,"arg":69}}
++{"ie":90,"app":{"fn":89,"arg":45}}
++{"ie":91,"app":{"fn":90,"arg":47}}
++{"ie":92,"app":{"fn":91,"arg":85}}
++{"ie":93,"const":{"name":1,"us":[3]}}
++{"ie":94,"app":{"fn":93,"arg":43}}
++{"ie":95,"app":{"fn":94,"arg":92}}
++{"ie":96,"const":{"name":9,"us":[3]}}
++{"ie":97,"app":{"fn":96,"arg":43}}
++{"ie":98,"app":{"fn":97,"arg":45}}
++{"ie":99,"app":{"fn":95,"arg":45}}
++{"ie":100,"app":{"fn":95,"arg":47}}
++{"thm":{"all":[32],"name":32,"levelParams":[],"type":99,"value":98}}
+diff --git a/tests/fixtures/native32-typed-k/missing-rule.ndjson b/tests/fixtures/native32-typed-k/missing-rule.ndjson
+new file mode 100644
+index 0000000..65b01e4
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/missing-rule.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleK"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":207580489,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":47,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":77,"value":82}}
+diff --git a/tests/fixtures/native32-typed-k/partial-untyped-minor.ndjson b/tests/fixtures/native32-typed-k/partial-untyped-minor.ndjson
+new file mode 100644
+index 0000000..000db42
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/partial-untyped-minor.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"etaRuleK"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"forallE":{"binderInfo":"default","body":43,"name":8,"type":63},"ie":64}
++{"app":{"arg":64,"fn":60},"ie":65}
++{"const":{"name":10,"us":[3,3]},"ie":66}
++{"app":{"arg":43,"fn":66},"ie":67}
++{"app":{"arg":47,"fn":67},"ie":68}
++{"in":22,"str":{"pre":0,"str":"x"}}
++{"in":23,"str":{"pre":22,"str":"_@"}}
++{"in":24,"str":{"pre":23,"str":"Renovation"}}
++{"in":25,"num":{"i":1296921618,"pre":24}}
++{"in":26,"str":{"pre":25,"str":"_hygCtx"}}
++{"in":27,"str":{"pre":26,"str":"_hyg"}}
++{"in":28,"num":{"i":31,"pre":27}}
++{"in":29,"num":{"i":33,"pre":27}}
++{"app":{"arg":1,"fn":62},"ie":69}
++{"ie":70,"lam":{"binderInfo":"default","body":43,"name":29,"type":69}}
++{"ie":71,"lam":{"binderInfo":"default","body":70,"name":28,"type":43}}
++{"app":{"arg":71,"fn":68},"ie":72}
++{"const":{"name":9,"us":[3]},"ie":73}
++{"app":{"arg":43,"fn":73},"ie":74}
++{"app":{"arg":47,"fn":74},"ie":75}
++{"app":{"arg":75,"fn":1},"ie":76}
++{"app":{"arg":45,"fn":72},"ie":77}
++{"app":{"arg":47,"fn":77},"ie":78}
++{"app":{"arg":78,"fn":65},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"forallE":{"binderInfo":"default","body":80,"name":4,"type":64},"ie":81}
++{"app":{"arg":64,"fn":73},"ie":82}
++{"app":{"arg":1,"fn":82},"ie":83}
++{"ie":84,"lam":{"binderInfo":"default","body":83,"name":4,"type":64}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":81,"value":84}}
+diff --git a/tests/fixtures/native32-typed-k/partial-wrong-index.ndjson b/tests/fixtures/native32-typed-k/partial-wrong-index.ndjson
+new file mode 100644
+index 0000000..064cd60
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/partial-wrong-index.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"etaRuleK"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"forallE":{"binderInfo":"default","body":43,"name":8,"type":63},"ie":64}
++{"app":{"arg":64,"fn":60},"ie":65}
++{"const":{"name":10,"us":[3,3]},"ie":66}
++{"app":{"arg":43,"fn":66},"ie":67}
++{"app":{"arg":47,"fn":67},"ie":68}
++{"in":22,"str":{"pre":0,"str":"x"}}
++{"in":23,"str":{"pre":22,"str":"_@"}}
++{"in":24,"str":{"pre":23,"str":"Renovation"}}
++{"in":25,"num":{"i":1296921618,"pre":24}}
++{"in":26,"str":{"pre":25,"str":"_hygCtx"}}
++{"in":27,"str":{"pre":26,"str":"_hyg"}}
++{"in":28,"num":{"i":31,"pre":27}}
++{"in":29,"num":{"i":33,"pre":27}}
++{"app":{"arg":1,"fn":62},"ie":69}
++{"ie":70,"lam":{"binderInfo":"default","body":43,"name":29,"type":69}}
++{"ie":71,"lam":{"binderInfo":"default","body":70,"name":28,"type":43}}
++{"app":{"arg":71,"fn":68},"ie":72}
++{"const":{"name":9,"us":[3]},"ie":73}
++{"app":{"arg":43,"fn":73},"ie":74}
++{"app":{"arg":47,"fn":74},"ie":75}
++{"app":{"arg":75,"fn":1},"ie":76}
++{"app":{"arg":76,"fn":72},"ie":77}
++{"app":{"arg":45,"fn":77},"ie":78}
++{"app":{"arg":78,"fn":65},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"forallE":{"binderInfo":"default","body":80,"name":4,"type":64},"ie":81}
++{"app":{"arg":64,"fn":73},"ie":82}
++{"app":{"arg":1,"fn":82},"ie":83}
++{"ie":84,"lam":{"binderInfo":"default","body":83,"name":4,"type":64}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":81,"value":84}}
+diff --git a/tests/fixtures/native32-typed-k/withdraw-k.ndjson b/tests/fixtures/native32-typed-k/withdraw-k.ndjson
+new file mode 100644
+index 0000000..0e0529f
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/withdraw-k.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":1,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleK"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":207580489,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":47,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":77,"value":82}}
+diff --git a/tests/fixtures/native32-typed-k/wrong-index-count.ndjson b/tests/fixtures/native32-typed-k/wrong-index-count.ndjson
+new file mode 100644
+index 0000000..17773a7
+--- /dev/null
++++ b/tests/fixtures/native32-typed-k/wrong-index-count.ndjson
+@@ -0,0 +1,121 @@
++{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"cb63311203a44983a2326b83fcb16dbbd5c5130a","version":"4.38.0, commit cb63311203a44983a2326b83fcb16dbbd5c5130a"}}}
++{"in":1,"str":{"pre":0,"str":"Eq"}}
++{"in":2,"str":{"pre":0,"str":"u_1"}}
++{"il":1,"param":2}
++{"in":3,"str":{"pre":0,"str":"\u03b1"}}
++{"ie":0,"sort":1}
++{"in":4,"str":{"pre":0,"str":"a"}}
++{"in":5,"str":{"pre":4,"str":"_@"}}
++{"in":6,"str":{"pre":5,"str":"_internal"}}
++{"in":7,"str":{"pre":6,"str":"_hyg"}}
++{"in":8,"num":{"i":0,"pre":7}}
++{"bvar":0,"ie":1}
++{"bvar":1,"ie":2}
++{"ie":3,"sort":0}
++{"forallE":{"binderInfo":"default","body":3,"name":8,"type":2},"ie":4}
++{"forallE":{"binderInfo":"default","body":4,"name":8,"type":1},"ie":5}
++{"forallE":{"binderInfo":"implicit","body":5,"name":3,"type":0},"ie":6}
++{"in":9,"str":{"pre":1,"str":"refl"}}
++{"const":{"name":1,"us":[1]},"ie":7}
++{"app":{"arg":2,"fn":7},"ie":8}
++{"app":{"arg":1,"fn":8},"ie":9}
++{"app":{"arg":1,"fn":9},"ie":10}
++{"forallE":{"binderInfo":"default","body":10,"name":4,"type":1},"ie":11}
++{"forallE":{"binderInfo":"implicit","body":11,"name":3,"type":0},"ie":12}
++{"in":10,"str":{"pre":1,"str":"rec"}}
++{"in":11,"str":{"pre":0,"str":"u"}}
++{"il":2,"param":11}
++{"in":12,"str":{"pre":0,"str":"motive"}}
++{"in":13,"str":{"pre":0,"str":"t"}}
++{"bvar":2,"ie":13}
++{"app":{"arg":13,"fn":7},"ie":14}
++{"app":{"arg":2,"fn":14},"ie":15}
++{"app":{"arg":1,"fn":15},"ie":16}
++{"ie":17,"sort":2}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":16},"ie":18}
++{"forallE":{"binderInfo":"default","body":18,"name":8,"type":2},"ie":19}
++{"in":14,"str":{"pre":0,"str":"refl"}}
++{"app":{"arg":2,"fn":1},"ie":20}
++{"const":{"name":9,"us":[1]},"ie":21}
++{"app":{"arg":13,"fn":21},"ie":22}
++{"app":{"arg":2,"fn":22},"ie":23}
++{"app":{"arg":23,"fn":20},"ie":24}
++{"bvar":3,"ie":25}
++{"bvar":4,"ie":26}
++{"app":{"arg":26,"fn":7},"ie":27}
++{"app":{"arg":25,"fn":27},"ie":28}
++{"app":{"arg":1,"fn":28},"ie":29}
++{"app":{"arg":2,"fn":25},"ie":30}
++{"app":{"arg":1,"fn":30},"ie":31}
++{"forallE":{"binderInfo":"default","body":31,"name":13,"type":29},"ie":32}
++{"forallE":{"binderInfo":"implicit","body":32,"name":8,"type":25},"ie":33}
++{"forallE":{"binderInfo":"default","body":33,"name":14,"type":24},"ie":34}
++{"forallE":{"binderInfo":"implicit","body":34,"name":12,"type":19},"ie":35}
++{"forallE":{"binderInfo":"implicit","body":35,"name":8,"type":1},"ie":36}
++{"forallE":{"binderInfo":"implicit","body":36,"name":3,"type":0},"ie":37}
++{"ie":38,"lam":{"binderInfo":"default","body":1,"name":14,"type":24}}
++{"ie":39,"lam":{"binderInfo":"default","body":38,"name":12,"type":19}}
++{"ie":40,"lam":{"binderInfo":"default","body":39,"name":8,"type":1}}
++{"ie":41,"lam":{"binderInfo":"implicit","body":40,"name":3,"type":0}}
++{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[2],"name":9,"numFields":0,"numParams":2,"type":12}],"recs":[{"all":[1],"isUnsafe":false,"k":true,"levelParams":[11,2],"name":10,"numIndices":1,"numMinors":1,"numMotives":1,"numParams":2,"rules":[{"ctor":9,"nfields":0,"rhs":41}],"type":37}],"types":[{"all":[1],"ctors":[9],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isUnsafe":false,"levelParams":[2],"name":1,"numIndices":0,"numNested":0,"numParams":2,"type":6}]}}
++{"in":15,"str":{"pre":0,"str":"Bool"}}
++{"il":3,"succ":0}
++{"ie":42,"sort":3}
++{"in":16,"str":{"pre":15,"str":"false"}}
++{"in":17,"str":{"pre":15,"str":"true"}}
++{"const":{"name":15,"us":[]},"ie":43}
++{"in":18,"str":{"pre":15,"str":"rec"}}
++{"forallE":{"binderInfo":"default","body":17,"name":13,"type":43},"ie":44}
++{"in":19,"str":{"pre":0,"str":"false"}}
++{"const":{"name":16,"us":[]},"ie":45}
++{"app":{"arg":45,"fn":1},"ie":46}
++{"in":20,"str":{"pre":0,"str":"true"}}
++{"const":{"name":17,"us":[]},"ie":47}
++{"app":{"arg":47,"fn":2},"ie":48}
++{"app":{"arg":1,"fn":25},"ie":49}
++{"forallE":{"binderInfo":"default","body":49,"name":13,"type":43},"ie":50}
++{"forallE":{"binderInfo":"default","body":50,"name":20,"type":48},"ie":51}
++{"forallE":{"binderInfo":"default","body":51,"name":19,"type":46},"ie":52}
++{"forallE":{"binderInfo":"implicit","body":52,"name":12,"type":44},"ie":53}
++{"ie":54,"lam":{"binderInfo":"default","body":2,"name":20,"type":48}}
++{"ie":55,"lam":{"binderInfo":"default","body":54,"name":19,"type":46}}
++{"ie":56,"lam":{"binderInfo":"default","body":55,"name":12,"type":44}}
++{"ie":57,"lam":{"binderInfo":"default","body":1,"name":20,"type":48}}
++{"ie":58,"lam":{"binderInfo":"default","body":57,"name":19,"type":46}}
++{"ie":59,"lam":{"binderInfo":"default","body":58,"name":12,"type":44}}
++{"inductive":{"ctors":[{"cidx":0,"induct":15,"isUnsafe":false,"levelParams":[],"name":16,"numFields":0,"numParams":0,"type":43},{"cidx":1,"induct":15,"isUnsafe":false,"levelParams":[],"name":17,"numFields":0,"numParams":0,"type":43}],"recs":[{"all":[15],"isUnsafe":false,"k":false,"levelParams":[11],"name":18,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":16,"nfields":0,"rhs":56},{"ctor":17,"nfields":0,"rhs":59}],"type":53}],"types":[{"all":[15],"ctors":[16,17],"hasEta":false,"hasLargeElim":true,"hasProjections":false,"isImpredicative":false,"isK":false,"isRec":false,"isUnsafe":false,"levelParams":[],"name":15,"numIndices":0,"numNested":0,"numParams":0,"type":42}]}}
++{"in":21,"str":{"pre":0,"str":"ruleK"}}
++{"in":22,"str":{"pre":0,"str":"h"}}
++{"const":{"name":1,"us":[3]},"ie":60}
++{"app":{"arg":43,"fn":60},"ie":61}
++{"app":{"arg":47,"fn":61},"ie":62}
++{"app":{"arg":47,"fn":62},"ie":63}
++{"const":{"name":10,"us":[3,3]},"ie":64}
++{"app":{"arg":43,"fn":64},"ie":65}
++{"app":{"arg":47,"fn":65},"ie":66}
++{"in":23,"str":{"pre":0,"str":"x"}}
++{"in":24,"str":{"pre":23,"str":"_@"}}
++{"in":25,"str":{"pre":24,"str":"Tutorial"}}
++{"in":26,"num":{"i":207580489,"pre":25}}
++{"in":27,"str":{"pre":26,"str":"_hygCtx"}}
++{"in":28,"str":{"pre":27,"str":"_hyg"}}
++{"in":29,"num":{"i":17,"pre":28}}
++{"in":30,"num":{"i":19,"pre":28}}
++{"app":{"arg":1,"fn":62},"ie":67}
++{"ie":68,"lam":{"binderInfo":"default","body":43,"name":30,"type":67}}
++{"ie":69,"lam":{"binderInfo":"default","body":68,"name":29,"type":43}}
++{"app":{"arg":69,"fn":66},"ie":70}
++{"app":{"arg":1,"fn":70},"ie":71}
++{"app":{"arg":47,"fn":71},"ie":72}
++{"app":{"arg":2,"fn":72},"ie":73}
++{"app":{"arg":73,"fn":61},"ie":74}
++{"app":{"arg":1,"fn":74},"ie":75}
++{"forallE":{"binderInfo":"default","body":75,"name":4,"type":43},"ie":76}
++{"forallE":{"binderInfo":"default","body":76,"name":22,"type":63},"ie":77}
++{"in":31,"num":{"i":27,"pre":28}}
++{"const":{"name":9,"us":[3]},"ie":78}
++{"app":{"arg":43,"fn":78},"ie":79}
++{"app":{"arg":1,"fn":79},"ie":80}
++{"ie":81,"lam":{"binderInfo":"default","body":80,"name":4,"type":43}}
++{"ie":82,"lam":{"binderInfo":"default","body":81,"name":31,"type":63}}
++{"thm":{"all":[21],"levelParams":[],"name":21,"type":77,"value":82}}
+diff --git a/tests/native32_typed_k.rs b/tests/native32_typed_k.rs
+new file mode 100644
+index 0000000..089762d
+--- /dev/null
++++ b/tests/native32_typed_k.rs
+@@ -0,0 +1,48 @@
++use std::io::Write;
++use std::path::Path;
++use std::process::{Command, Stdio};
++
++fn check(name: &str, expected: i32) {
++    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
++    let flags: std::collections::HashMap<String, String> =
++        serde_json::from_slice(&std::fs::read(root.join("arena-flags.json")).unwrap()).unwrap();
++    let mut cmd = Command::new(env!("CARGO_BIN_EXE_metatron-kernel"));
++    for (key, _) in std::env::vars_os() {
++        let s = key.to_string_lossy();
++        if s.starts_with("NUCLEUS_") || s.starts_with("METATRON_") {
++            cmd.env_remove(key);
++        }
++    }
++    cmd.envs(flags).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
++    let bytes = std::fs::read(root.join("tests/fixtures/native32-typed-k").join(format!("{name}.ndjson"))).unwrap();
++    let mut child = cmd.spawn().unwrap();
++    child.stdin.take().unwrap().write_all(&bytes).unwrap();
++    let output = child.wait_with_output().unwrap();
++    assert_eq!(output.status.code(), Some(expected), "{name}: {}", String::from_utf8_lossy(&output.stderr));
++}
++
++#[test]
++fn typed_k_reduces_at_the_matching_index() {
++    check("099_ruleK", 0);
++}
++
++#[test]
++fn typed_k_preserves_dependent_function_eta() {
++    check("129_etaRuleK", 0);
++}
++
++#[test]
++fn indexed_identity_iota_uses_the_source_minor() {
++    check("indexed-iota-good", 0);
++    check("indexed-iota-bad", 2);
++}
++
++#[test]
++fn typed_k_wrong_index_and_withdrawn_authority_decline() {
++    // This Eq family needs K to justify its declared large elimination.
++    check("withdraw-k", 1);
++    for name in ["100_ruleKbad", "wrong-index-count", "forged-rule", "missing-rule",
++                 "partial-wrong-index", "partial-untyped-minor"] {
++        check(name, 2);
++    }
++}
