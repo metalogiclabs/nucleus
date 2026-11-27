@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use super::Features;
 
 mod parametric;
+mod composite;
 
 pub(super) const MAX_RECORDS: usize = 4096;
 
@@ -308,6 +309,10 @@ pub(super) fn ordinary_outcome(rows:&[Value], meta:Value)->Option<super::Outcome
         Verdict::Reject=>Some(super::Outcome::Reject("ordinary-native-typing")),
         Verdict::Unknown|Verdict::Error=>None,
     }
+}
+
+pub(super) fn composite_outcome(rows:&[Value],meta:Value)->Option<super::Outcome>{
+    composite::check(rows,meta)
 }
 
 pub(super) fn projection_outcome(rows:&[Value])->Option<super::Outcome>{

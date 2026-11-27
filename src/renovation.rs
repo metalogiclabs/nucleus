@@ -328,7 +328,7 @@ fn check_inner<R: BufRead>(reader: R, verified_header: bool, native_meta:Option<
         Ok(Outcome::AcceptReconstructed)
     } else if let Some(outcome) = whole_export.as_ref().and_then(|rows| nullary::projection_outcome(rows)) {
         Ok(outcome)
-    } else if let Some(outcome)=whole_export.as_ref().and_then(|rows| native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta))) {
+    } else if let Some(outcome)=whole_export.as_ref().and_then(|rows| native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta.clone()).or_else(||nullary::composite_outcome(rows,meta)))) {
         Ok(outcome)
     } else {
         Ok(Outcome::Unknown)
