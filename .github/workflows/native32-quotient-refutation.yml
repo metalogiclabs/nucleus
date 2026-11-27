@@ -1,0 +1,277 @@
+name: Native quotient contradiction certificates on qualified positive source
+on:
+  push:
+    branches: [test/native32-quotient-refutation-12ce8435]
+    paths: ['.github/workflows/native32-quotient-refutation.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Restore and verify exact qualified quotient runtime
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          P=487e80f2279852cd8ae021c6689e82157c090d34
+          git merge-base --is-ancestor "$P" HEAD
+          git diff --exit-code "$P" HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json scripts tests tests_py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15232446216/zip > evidence-run/positive.zip
+          printf '%s  %s\n' 6549b8cb705aa8dcf046e65c73ed484e92a3660b2b092c16a469a56f9f58d56b evidence-run/positive.zip | sha256sum -c -
+          python3 - <<'PY'
+          import zipfile,pathlib,hashlib
+          o=pathlib.Path('evidence-run')
+          with zipfile.ZipFile(o/'positive.zip') as z:
+              assert z.testzip() is None
+              for name in ('candidate-source.tar.gz','candidate-src-tree.txt','candidate'):
+                  (o/name).write_bytes(z.read(name))
+          assert hashlib.sha256((o/'candidate').read_bytes()).hexdigest()=='c423b8787b1933408540610ea41f85e2a0196ee4fcdeabcea0525b0571a8bde1'
+          (o/'candidate').rename(o/'baseline')
+          (o/'baseline').chmod(0o755)
+          PY
+          tar -xzf evidence-run/candidate-source.tar.gz
+          git add src
+          test "$(git rev-parse "$(git write-tree):src")" = dde6c6229d1c6f813375036284328ed353e99c0e
+          git diff --cached -- src > evidence-run/positive-source.patch
+          printf '%s  %s\n' ae08278265b25270208c483a8b10d0c010b39822df382627dc3fdf29a7e1ed4c arena-flags.json | sha256sum -c -
+      - name: Add only independently sufficient quotient contradictions
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation/nullary.rs')
+          s=p.read_text()
+          s+=r'''
+          // Negative authority is separate from positive reconstruction.
+          // The failure of a syntactic signature recognizer is not evidence.
+          // Only rigid head/telescope and explicit level-assignment
+          // contradictions survive this bounded route.
+          pub(super) fn quotient_refutation(rows:&[Value],meta:Option<&Value>)->Option<&'static str>{
+              let new_profile=meta.is_some_and(|m|
+                  m.pointer("/meta/format/version").and_then(Value::as_str)==Some("3.2.0") &&
+                  m.pointer("/meta/lean/githash").and_then(Value::as_str)==Some("a8ad4dbebef375bdba9a6233afdb8ad52dbb16cd"));
+              let mut t=Tables::new();
+              let mut rigid=HashSet::new();
+              for row in rows {
+                  if keys(row,&["inductive"]){
+                      let b=row.get("inductive")?;
+                      // If the input were valid, these would be opaque type
+                      // constructors, never delta-reducible abbreviations.
+                      for i in arr(b,"types")? {
+                          let n=num(i,"name")?;
+                          need(t.valid_name(n)&&num(i,"type")?<t.exprs.len()&&rigid.insert(n))?;
+                      }
+                      continue;
+                  }
+                  if !keys(row,&["quot"]){
+                      // Unknown shapes prevent a proof, not a rejection.
+                      t.add(row)?;
+                      continue;
+                  }
+                  let q=row.get("quot")?;
+                  need(keys(q,&["kind","name","levelParams","type"]))?;
+                  let n=num(q,"name")?;
+                  need(t.valid_name(n))?;
+                  let root=(1..t.names.len()).find(|&i|t.name(i,0,"Quot"))?;
+                  let (role,arity,binders)=if n==root {("type",1,2)}
+                      else if t.name(n,root,"mk"){("ctor",1,3)}
+                      else if t.name(n,root,"lift"){("lift",2,6)}
+                      else if t.name(n,root,"ind"){("ind",1,5)}
+                      else{return None};
+                  let ps=numbers(q,"levelParams")?;
+                  need(ps.iter().all(|&p|t.valid_name(p)))?;
+                  let kind=q.get("kind")?.as_str()?;
+                  let ty=num(q,"type")?;
+                  need(ty<t.exprs.len())?;
+                  // The canonical constant's role and universe arity are
+                  // fixed under both the legacy and renovated profiles.
+                  if kind!=role {return Some("quotient-canonical-role");}
+                  if ps.len()!=arity {return Some("quotient-universe-arity");}
+                  let mut tail=ty;
+                  let mut actual=0usize;
+                  while let Some((_,body))=t.binder(tail,true){
+                      actual+=1;
+                      tail=body;
+                  }
+                  let mut head=tail;
+                  while let Some(Expr::App(f,_))=t.exprs.get(head){head=*f;}
+                  let rigid_tail=matches!(t.exprs.get(tail),Some(Expr::Sort(_))) ||
+                      matches!(t.exprs.get(head),Some(Expr::Const(c,_)) if rigid.contains(c));
+                  if actual<binders&&rigid_tail{
+                      return Some("quotient-rigid-telescope");
+                  }
+                  if role=="type"&&new_profile&&actual==2 {
+                      if let Some(l)=t.sort_of(tail){
+                          // Evaluate every universe parameter at zero. The
+                          // renovated Quot result is then Sort 1. A result
+                          // Sort 0 at that very assignment cannot be equal.
+                          let mut zero=Vec::<bool>::with_capacity(t.levels.len());
+                          for level in &t.levels{
+                              let z=match level{
+                                  Level::Zero|Level::Param(_)=>true,
+                                  Level::Succ(_)=>false,
+                                  Level::Max(a,b)=>*zero.get(*a)?&&*zero.get(*b)?,
+                                  Level::IMax(_,b)=>*zero.get(*b)?,
+                              };
+                              zero.push(z);
+                          }
+                          if *zero.get(l)?{return Some("quotient-result-universe-zero-witness");}
+                      }
+                  }
+                  // Prior Quot declarations are themselves primitive
+                  // constants in any valid replay. No missing-role rule.
+                  if role=="type"{need(rigid.insert(n))?;}
+              }
+              None
+          }
+          '''
+          p.write_text(s)
+          p=Path('src/renovation.rs');s=p.read_text()
+          a='native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta.clone()).or_else(||nullary::composite_outcome(rows,meta)))'
+          b='native_meta.clone().and_then(|meta|nullary::ordinary_outcome(rows,meta.clone()).or_else(||nullary::composite_outcome(rows,meta)))'
+          assert s.count(a)==1;s=s.replace(a,b)
+          a='''        Ok(outcome)
+              } else {
+                  Ok(Outcome::Unknown)
+              }
+          }'''
+          b='''        Ok(outcome)
+              } else if let Some(reason)=whole_export.as_ref().and_then(|rows|nullary::quotient_refutation(rows,native_meta.as_ref())){
+                  Ok(Outcome::Reject(reason))
+              } else {
+                  Ok(Outcome::Unknown)
+              }
+          }'''
+          assert s.count(a)==1;s=s.replace(a,b);p.write_text(s)
+          PY
+          git diff --check
+          git diff --exit-code -- . ':!src/renovation.rs' ':!src/renovation/nullary.rs' ':!evidence-run'
+          git diff -- src > evidence-run/refutation.patch
+          git add src/renovation.rs src/renovation/nullary.rs
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/refutation-source.tar.gz src
+          cargo build --locked --release --features diagnostics > evidence-run/build.log 2>&1 || { cat evidence-run/build.log; exit 1; }
+          cp target/release/metatron-kernel evidence-run/refutation
+          sha256sum evidence-run/baseline evidence-run/refutation arena-flags.json > evidence-run/binaries.sha256
+          python3 scripts/test.py > evidence-run/rust-tests.log 2>&1
+          python3 -m unittest discover -s tests_py > evidence-run/python-tests.log 2>&1
+      - name: Install pinned official preview oracle
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4-pr-releases:pr-release-16595-a8ad4db
+          "$HOME/.elan/bin/elan" run leanprover/lean4-pr-releases:pr-release-16595-a8ad4db lean --version > evidence-run/oracle-version.txt
+          grep -q a8ad4db evidence-run/oracle-version.txt
+      - name: Recheck positive authority and reject only proven contradictions
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,subprocess,tarfile,zipfile
+          O=pathlib.Path('evidence-run')
+          def digest(raw):return hashlib.sha256(raw).hexdigest()
+          def archive(raw):
+              z=zipfile.ZipFile(io.BytesIO(raw));assert z.testzip() is None;return z
+          def inputs(raw):
+              z=archive(raw)
+              with tarfile.open(fileobj=io.BytesIO(z.read('lean-arena-tests.tar.gz'))) as t:
+                  return {m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          def save(name,val):(O/name).write_text(json.dumps(val,indent=2,sort_keys=True)+'\n')
+          env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))}
+          env.update(json.loads(pathlib.Path('arena-flags.json').read_text()))
+          def run(raw,baseline=False):
+              if len(raw)>10*1024*1024:return 2,'input byte allowance'
+              p=subprocess.run([str((O/('baseline' if baseline else 'refutation')).resolve())],input=raw,capture_output=True,env=env,timeout=120)
+              return p.returncode,p.stderr.decode(errors='replace')
+          pos=archive((O/'positive.zip').read_bytes())
+          z=archive(pos.read('census.zip'))
+          q=archive(z.read('qualified.zip'))
+          pk=archive(q.read('base.zip'));k=archive(pk.read('base.zip'));identity=archive(k.read('base.zip'))
+          iota=archive(identity.read('base.zip'));composition=archive(iota.read('composition.zip'));ordinary=archive(composition.read('base.zip'));old=archive(ordinary.read('prior-qualification.zip'))
+          cohorts={key:(data,{r['name']:r for r in json.loads(pos.read(key+'-rows.json'))}) for key,data in {
+            'preview':inputs(z.read('corpus.zip')),
+            'current':inputs(ordinary.read('test-tarball.zip')),
+            'prior':inputs(old.read('tarball.zip'))
+          }.items()}
+          # Authentic cases and original seven mutation/withdrawal controls.
+          fixture_dir=O/'controls';fixture_dir.mkdir()
+          controls=[]
+          required={'mut-old-sort','mut-forged-lift-signature','mut-wrong-role'}
+          for r in json.loads(pos.read('controls.json')):
+              name=r['name'];raw=pos.read('controls/'+name+'.ndjson')
+              assert digest(raw)==r['sha256']
+              p=fixture_dir/(name+'.ndjson');p.write_bytes(raw)
+              before,_=run(raw,True);after,err=run(raw)
+              native=subprocess.run(['elan','run','leanprover/lean4-pr-releases:pr-release-16595-a8ad4db','leanchecker','--from-export',str(p)],capture_output=True,timeout=120)
+              item={'name':name,'sha256':digest(raw),'before':before,'exit':after,'official':native.returncode,'official_stdout':native.stdout.decode(errors='replace'),'official_stderr':native.stderr.decode(errors='replace'),'stderr':err}
+              controls.append(item);save('controls.json',controls);print('CONTROL',json.dumps(item),flush=True)
+              assert before==r['exit'] and native.returncode==r['official'],item
+              if name in required:
+                  assert after==1 and native.returncode==1 and 'NUCLEUS_RENOVATION_REFUTATION: quotient-' in err,item
+              else:
+                  assert after==before,item
+          # The valid partial packages and profile withdrawal must remain UNKNOWN.
+          assert all(r['exit']==2 for r in controls if r['name'] in ('mut-missing-ind','mut-missing-lift','mut-withdraw-preview-profile'))
+          # Authentic legacy malformed telescope; official preview independently
+          # replays the exact published legacy bytes without rewriting metadata.
+          legacy=cohorts['preview'][0]['bugs/quot-bad-type']
+          p=fixture_dir/'legacy-quot-bad-type.ndjson';p.write_bytes(legacy)
+          before,_=run(legacy,True);after,err=run(legacy)
+          native=subprocess.run(['elan','run','leanprover/lean4-pr-releases:pr-release-16595-a8ad4db','leanchecker','--from-export',str(p)],capture_output=True,timeout=120)
+          item={'name':'legacy-quot-bad-type','sha256':digest(legacy),'before':before,'exit':after,'official':native.returncode,'official_stdout':native.stdout.decode(errors='replace'),'official_stderr':native.stderr.decode(errors='replace'),'stderr':err}
+          controls.append(item);save('controls.json',controls);print('CONTROL',json.dumps(item),flush=True)
+          assert before==2 and after==1 and native.returncode==1 and 'quotient-rigid-telescope' in err,item
+          # Positive semantic-equivalence control: reverse max operands.
+          raw=pos.read('controls/renovation-133_quotOfPropIsType.ndjson')
+          rows=[json.loads(l) for l in raw.splitlines()]
+          qtype=next(r['quot'] for r in rows if 'quot' in r)
+          exprs={r['ie']:r for r in rows if 'ie' in r}
+          result=exprs[exprs[exprs[qtype['type']]['forallE']['body']]['forallE']['body']]
+          level=next(r for r in rows if r.get('il')==result['sort'])
+          assert 'max' in level;level['max'].reverse()
+          equiv=(''.join(json.dumps(r,separators=(',',':'))+'\n' for r in rows)).encode()
+          p=fixture_dir/'equivalent-max-order.ndjson';p.write_bytes(equiv)
+          before,_=run(equiv,True);after,err=run(equiv)
+          native=subprocess.run(['elan','run','leanprover/lean4-pr-releases:pr-release-16595-a8ad4db','leanchecker','--from-export',str(p)],capture_output=True,timeout=120)
+          item={'name':'equivalent-max-order','sha256':digest(equiv),'before':before,'exit':after,'official':native.returncode,'official_stdout':native.stdout.decode(errors='replace'),'official_stderr':native.stderr.decode(errors='replace'),'stderr':err}
+          controls.append(item);save('controls.json',controls);print('CONTROL',json.dumps(item),flush=True)
+          assert native.returncode==0 and after==before and after!=1,item
+          summaries={};violations=[]
+          for cohort,(ins,previous) in cohorts.items():
+              assert len(ins)==356 and set(ins)==set(previous),cohort
+              records=[]
+              for name,data in ins.items():
+                  row=previous[name];assert digest(data)==row['sha256'],name
+                  before,_=run(data,True);after,err=run(data)
+                  allowed=(before==2 and after==1 and row['expected']=='reject' and 'NUCLEUS_RENOVATION_REFUTATION: quotient-' in err)
+                  if before!=row['exit'] or (after!=before and not allowed):
+                      violations.append((cohort,name,before,after,row['exit'],row['expected']))
+                  records.append({'name':name,'sha256':digest(data),'expected':row['expected'],'before':before,'exit':after,'stderr':err})
+              summary={'count':len(records),'counts':dict(collections.Counter(r['exit'] for r in records)),'changes':[r for r in records if r['before']!=r['exit']]}
+              save(cohort+'-rows.json',records);summaries[cohort]=summary
+              print('COHORT',cohort,json.dumps(summary),flush=True)
+          save('summary.json',summaries);save('violations.json',violations)
+          assert not violations,violations
+          assert any(r['name']=='bugs/quot-bad-type' and r['before']==2 and r['exit']==1 for r in summaries['preview']['changes'])
+          print('QUOTIENT_REFUTATION_QUALIFIED_BOUNDED',flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-quotient-refutation
+          path: evidence-run/
+          retention-days: 60
