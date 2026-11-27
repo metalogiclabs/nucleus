@@ -359,12 +359,27 @@ fn checked_identity(t:&Tables,b:&Value)->Option<CertifiedFamily>{
             level_params:numbers(row,"levelParams")?.into_iter().map(|n|u64::try_from(n).ok().map(NameId)).collect::<Option<Vec<_>>>()?,
             ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
     };
-    // Do not install a reduction certificate. This experiment
-    // tests only the checked opaque indexed signatures.
+    // All indexed identity claims were reconstructed above, including
+    // the constructor result, exact index telescope, flags and rule RHS.
+    // Reuse the independently implemented typed K boundary, which
+    // compares the replacement constructor type with the major domain.
+    // No rule is inferred from a declaration name or K bit alone.
+    let name=|n:usize|u64::try_from(n).ok().map(NameId);
+    let reduction=crate::machine::RecursorReduction{
+        k:true,num_params:2,num_indices:1,
+        level_params:rps.iter().copied().map(name).collect::<Option<Vec<_>>>()?,
+        rules:vec![crate::machine::RecursorRule{
+            constructor:name(c)?,
+            constructor_level_params:ps.iter().copied().map(name).collect::<Option<Vec<_>>>()?,
+            num_params:2,num_fields:0,
+            rhs:ExprId(u64::try_from(num(rule,"rhs")?).ok()?),
+        }],
+    };
     Some(CertifiedFamily{signatures:vec![
         signature(ind,OpaqueInductiveKind::Type)?,
         signature(ctor,OpaqueInductiveKind::Constructor)?,
-        signature(rec,OpaqueInductiveKind::Recursor)?],reduction:None})
+        signature(rec,OpaqueInductiveKind::Recursor)?],
+        reduction:Some((name(r)?,reduction))})
 }
 
 impl PriorFamilies {

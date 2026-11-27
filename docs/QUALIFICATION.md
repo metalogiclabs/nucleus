@@ -140,3 +140,22 @@ opaque signatures, not indexed reduction or K authority. The
 exact runtime manifest and original fixtures are retained.
 Full indexed/recursive support and whole-Mathlib acceptance are
 not established.
+
+
+## Native typed K and indexed iota (2026-11-27)
+
+[Qualification 45968074994](https://github.com/metalogiclabs/nucleus/actions/runs/45968074994)
+compared three builds: opaque signatures, indexed constructor iota
+without K, and typed K. The authentic ruleK proof changed 2/2/0;
+ruleKbad stayed 2/2/2. A local concrete constructor separator
+changed 2/0/0, while its wrong-index counterpart stayed 2/2/2.
+The valid trace proves constructor/major-domain compatibility;
+the negative trace refutes it without granting reduction.
+
+Current native corpus 93A/51R/212U; earlier corpus 63A/51R/242U.
+All previously decided rows and all 26 external/native controls
+preserved. No false ACCEPT observed. This is an acceptance-only
+bounded expansion for fully reconstructed identity families, not
+general indexed or recursive verification. Partial recursor eta
+and recursive dependencies still decline. Exact source and inputs
+are retained in the qualification manifest and artifact.
