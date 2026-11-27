@@ -21,6 +21,7 @@ enum Expr {
     BVar(usize), Sort(usize), Const(usize, Vec<usize>),
     App(usize, usize), Pi(usize, usize), Lam(usize, usize),
     Proj(usize, usize, usize),
+    OrdinaryLet,
 }
 struct Tables {
     names: Vec<Option<(usize,NamePart)>>,
@@ -116,6 +117,16 @@ impl Tables {
     }
     // Only the compositional declaration route admits projection records.
     // The predecessor's standalone admission boundary remains unchanged.
+    fn add_ordinary_let(&mut self,row:&Value)->Option<()> {
+        need(keys(row,&["ie","letE"]))?;
+        let id=num(row,"ie")?;
+        let p=row.get("letE")?;
+        need(keys(p,&["name","type","value","body","nondep"]))?;
+        need(id==self.exprs.len() && num(p,"name")?<self.names.len() && !boolean(p,"nondep")?)?;
+        need(num(p,"type")?<id && num(p,"value")?<id && num(p,"body")?<id)?;
+        self.exprs.push(Expr::OrdinaryLet);
+        Some(())
+    }
     fn add_projection(&mut self,row:&Value)->Option<()> {
         need(keys(row,&["ie","proj"]))?;
         let id=num(row,"ie")?;
@@ -238,6 +249,65 @@ pub(super) fn admits(rows:&[Value])->bool {
         t.block(b).or_else(||parametric::block(&t,b))
     }
     rows.len()<=MAX_RECORDS&&check(rows).is_some()
+}
+
+/// Reuse the existing typed core for an export containing only safe ordinary
+/// definitions and opaque theorems. All table records are checked by the
+/// strict reconstruction decoder, and all declarations are checked in
+/// source order by the independent core. In particular no axioms,
+/// primitive literals, projections, inductives or quotient semantics
+/// may cross this boundary. Unsupported syntax never supplies ACCEPT.
+pub(super) fn ordinary_outcome(rows:&[Value], meta:Value)->Option<super::Outcome>{
+    use crate::verdict::Verdict;
+    if rows.len()>MAX_RECORDS {return None;}
+    let mut tables=Tables::new();
+    let mut declarations=0usize;
+    let mut final_axiom=false;
+    for row in rows {
+        if final_axiom {return None;}
+        let (item,is_def)=if keys(row,&["def"]) {
+            (row.get("def")?,true)
+        } else if keys(row,&["thm"]) {
+            (row.get("thm")?,false)
+        } else if keys(row,&["axiom"]) {
+            // A final axiom may be refuted as ill-formed. It may
+            // never authorize acceptance or any subsequent claim.
+            let a=row.get("axiom")?;
+            need(keys(a,&["isUnsafe","levelParams","name","type"]))?;
+            need(!boolean(a,"isUnsafe")? && tables.valid_name(num(a,"name")?))?;
+            need(numbers(a,"levelParams")?.iter().all(|n|tables.valid_name(*n)))?;
+            need(num(a,"type")?<tables.exprs.len())?;
+            final_axiom=true;
+            declarations+=1;
+            continue;
+        } else {
+            if keys(row,&["ie","letE"]) {tables.add_ordinary_let(row)?;}
+            else {tables.add(row)?;}
+            continue;
+        };
+        if is_def {
+            need(keys(item,&["all","hints","levelParams","name","safety","type","value"]))?;
+            need(item.get("safety")?.as_str()?=="safe")?;
+            let hints=item.get("hints")?;
+            need(matches!(hints.as_str(),Some("opaque"|"abbrev"))
+                || (keys(hints,&["regular"]) && num(hints,"regular").is_some()))?;
+        } else {
+            need(keys(item,&["all","levelParams","name","type","value"]))?;
+        }
+        let name=num(item,"name")?;
+        need(tables.valid_name(name) && numbers(item,"all")?==[name])?;
+        need(numbers(item,"levelParams")?.iter().all(|n|tables.valid_name(*n)))?;
+        need(num(item,"type")?<tables.exprs.len() && num(item,"value")?<tables.exprs.len())?;
+        declarations+=1;
+    }
+    need(declarations>0)?;
+    let export=crate::parser::parse_ordinary_native(meta,rows).ok()?.resolve().ok()?;
+    match crate::checker::check_export(export,crate::checker::Limits::default()) {
+        Verdict::Accept if !final_axiom=>Some(super::Outcome::AcceptOrdinary),
+        Verdict::Accept=>None,
+        Verdict::Reject=>Some(super::Outcome::Reject("ordinary-native-typing")),
+        Verdict::Unknown|Verdict::Error=>None,
+    }
 }
 
 pub(super) fn projection_outcome(rows:&[Value])->Option<super::Outcome>{

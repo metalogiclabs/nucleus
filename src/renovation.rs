@@ -6,7 +6,7 @@
 //! init_K_target, init_projs_eta, check_large_elim, is_rec,
 //! mutual block flags and omission of small-elimination computation rules.
 use serde_json::Value;
-use std::{collections::HashSet, io::{BufRead, Read}};
+use std::{collections::{HashMap, HashSet}, io::{BufRead, Read}};
 
 mod nullary;
 mod unique_json;
@@ -128,14 +128,44 @@ fn read_level(v: &Value, levels: &[Option<Zeros>]) -> Option<Zeros> {
     }
 }
 
-fn telescope(exprs: &[Value], mut id: usize) -> Checked<(Vec<usize>, &Value)> {
+// Expression IDs are identities, not stream ordinals. The export
+// may introduce a high-numbered node before a low-numbered one.
+// Keep dependency order independently and never allocate by max ID.
+#[derive(Default)]
+struct ExpressionTable {
+    entries: HashMap<usize, (usize, Value)>,
+}
+impl ExpressionTable {
+    fn insert(&mut self, id: usize, row: Value) -> Checked<()> {
+        let ordinal = self.entries.len();
+        if self.entries.contains_key(&id) { return Err("duplicate expression ID"); }
+        self.entries.insert(id, (ordinal, row));
+        Ok(())
+    }
+    fn get(&self, id: usize) -> Option<&Value> {
+        self.entries.get(&id).map(|(_, row)| row)
+    }
+    fn earlier(&self, child: usize, parent: usize) -> bool {
+        match (self.entries.get(&child), self.entries.get(&parent)) {
+            (Some((c, _)), Some((p, _))) => c < p,
+            _ => false,
+        }
+    }
+    // Preserve the predecessor's complete-ID-set requirement.
+    // Only record order changes; sparse admission is not claimed.
+    fn dense(&self) -> bool {
+        self.entries.keys().all(|id| *id < self.entries.len())
+    }
+}
+
+fn telescope(exprs: &ExpressionTable, mut id: usize) -> Checked<(Vec<usize>, &Value)> {
     let mut domains = Vec::new();
     loop {
         let row = exprs.get(id).ok_or("unresolved telescope expression")?;
         if let Some(pi) = row.get("forallE") {
             let domain = number(pi, "type")?;
             let body = number(pi, "body")?;
-            if domain >= id || body >= id {
+            if !exprs.earlier(domain, id) || !exprs.earlier(body, id) {
                 return Err("forward or cyclic telescope edge");
             }
             domains.push(domain);
@@ -146,7 +176,7 @@ fn telescope(exprs: &[Value], mut id: usize) -> Checked<(Vec<usize>, &Value)> {
     }
 }
 
-fn contains_family(exprs: &[Value], domains: &[usize], names: &HashSet<usize>) -> Checked<bool> {
+fn contains_family(exprs: &ExpressionTable, domains: &[usize], names: &HashSet<usize>) -> Checked<bool> {
     let mut pending = domains.to_vec();
     let mut seen = HashSet::new();
     while let Some(id) = pending.pop() {
@@ -167,7 +197,7 @@ fn contains_family(exprs: &[Value], domains: &[usize], names: &HashSet<usize>) -
                     // Unknown forms are not a witness of recursion.
                     if let Some(edge) = node.get(*field) {
                         let child = integer(edge)?;
-                        if child >= id { return Err("forward or cyclic expression edge"); }
+                        if !exprs.earlier(child, id) { return Err("forward or cyclic expression edge"); }
                         pending.push(child);
                     }
                 }
@@ -177,7 +207,7 @@ fn contains_family(exprs: &[Value], domains: &[usize], names: &HashSet<usize>) -
     Ok(false)
 }
 
-fn check_block(block: &Value, exprs: &[Value], levels: &[Option<Zeros>]) -> Checked<Option<&'static str>> {
+fn check_block(block: &Value, exprs: &ExpressionTable, levels: &[Option<Zeros>]) -> Checked<Option<&'static str>> {
     let types = array(block, "types")?;
     let constructors = array(block, "ctors")?;
     let recursors = array(block, "recs")?;
@@ -243,15 +273,28 @@ fn check_block(block: &Value, exprs: &[Value], levels: &[Option<Zeros>]) -> Chec
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Outcome { AcceptReconstructed, Reject(&'static str), Unknown }
+pub(crate) enum Outcome { AcceptReconstructed, AcceptOrdinary, Reject(&'static str), Unknown }
 
 /// Read an already identified renovated stream. Preserve the old refutation
 /// fragment. ACCEPT only if a separate complete declaration reconstruction
 /// admits the entire duplicate-free export; otherwise return UNKNOWN.
-pub(crate) fn check<R: BufRead>(reader: R, verified_header: bool) -> Checked<Outcome> {
+pub(crate) fn check<R: BufRead>(reader:R, verified_header:bool)->Checked<Outcome>{
+    check_inner(reader,verified_header,None)
+}
+
+pub(crate) fn check_native<R:BufRead>(reader:R,header:&str)->Checked<Outcome>{
+    if !verified_header(header) {return Err("invalid native metadata");}
+    let meta=unique_json::parse(header).map_err(|_|"invalid native metadata")?;
+    if meta.pointer("/meta/format/version").and_then(Value::as_str)!=Some("3.2.0"){
+        return Err("not native 3.2 metadata");
+    }
+    check_inner(reader,true,Some(meta))
+}
+
+fn check_inner<R: BufRead>(reader: R, verified_header: bool, native_meta:Option<Value>) -> Checked<Outcome> {
     let mut whole_export = verified_header.then(Vec::<Value>::new);
     let mut levels = vec![Some(ZERO)];
-    let mut exprs = Vec::<Value>::new();
+    let mut exprs = ExpressionTable::default();
     let mut next_name = 1usize;
     for line in reader.lines() {
         let text = line.map_err(|_| "input read error")?;
@@ -273,15 +316,19 @@ pub(crate) fn check<R: BufRead>(reader: R, verified_header: bool) -> Checked<Out
             if integer(n)? != levels.len() { return Err("nonconsecutive level IDs"); }
             levels.push(read_level(&row, &levels));
         } else if let Some(n) = row.get("ie") {
-            if integer(n)? != exprs.len() { return Err("nonconsecutive expression IDs"); }
-            exprs.push(row);
+            let id = integer(n)?;
+            exprs.insert(id, row)?;
         } else if let Some(block) = row.get("inductive") {
             if let Some(reason) = check_block(block, &exprs, &levels)? { return Ok(Outcome::Reject(reason)); }
         }
     }
+    if !exprs.dense() { return Err("missing expression IDs"); }
+    // Whole-export admission remains unchanged, including strict table checks.
     if whole_export.as_ref().is_some_and(|rows| nullary::admits(rows)) {
         Ok(Outcome::AcceptReconstructed)
     } else if let Some(outcome) = whole_export.as_ref().and_then(|rows| nullary::projection_outcome(rows)) {
+        Ok(outcome)
+    } else if let Some(outcome)=whole_export.as_ref().and_then(|rows| native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta))) {
         Ok(outcome)
     } else {
         Ok(Outcome::Unknown)
@@ -298,6 +345,32 @@ mod tests {
         assert_eq!(Features { eta:true, ..off }.direct_refutation(), Some("eta-without-projections"));
         assert_eq!(Features { imp:true, projections:true, ..off }.direct_refutation(), Some("impredicative-projections"));
         assert_eq!(Features { imp:true, large:true, ..off }.direct_refutation(), Some("impredicative-large"));
+    }
+    #[test]
+    fn expression_identity_and_dependency_order_are_distinct() {
+        let mut t = ExpressionTable::default();
+        let sort = |id:usize| serde_json::json!({"ie":id,"sort":0});
+        t.insert(2,sort(2)).unwrap();
+        t.insert(1,sort(1)).unwrap();
+        t.insert(0,serde_json::json!({"ie":0,"forallE":{"type":2,"body":1}})).unwrap();
+        assert!(t.dense());
+        assert!(t.earlier(2,0));
+        assert!(!t.earlier(0,2));
+        assert!(!t.earlier(2,2));
+        assert!(telescope(&t,0).is_ok());
+        assert!(t.insert(2,sort(2)).is_err());
+        let mut forward = ExpressionTable::default();
+        forward.insert(0,serde_json::json!({"ie":0,"forallE":{"type":2,"body":1}})).unwrap();
+        forward.insert(2,sort(2)).unwrap();
+        forward.insert(1,sort(1)).unwrap();
+        assert!(telescope(&forward,0).is_err());
+    }
+    #[test]
+    fn unordered_table_is_not_admission_authority() {
+        let input = b"{\"ie\":1,\"sort\":0}\n{\"ie\":0,\"sort\":0}\n";
+        assert_eq!(check(std::io::Cursor::new(input),true),Ok(Outcome::Unknown));
+        let dup = b"{\"ie\":0,\"sort\":0}\n{\"ie\":0,\"sort\":0}\n";
+        assert!(check(std::io::Cursor::new(dup),true).is_err());
     }
     #[test]
     fn no_warrant_from_empty_or_malformed_new_input() {

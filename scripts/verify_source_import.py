@@ -8,7 +8,22 @@ import sys
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    manifest = json.loads((root / "evidence/source-import-20261126.json").read_text())
+    original_path = root / "evidence/source-import-20261126.json"
+    original = json.loads(original_path.read_text())
+    qualified_path = root / "evidence/native32-ordinary-qualification-20261127.json"
+    manifest = original
+    if qualified_path.exists():
+        manifest = json.loads(qualified_path.read_text())
+        if (manifest.get("status") != "WARRANTED_BOUNDED"
+                or manifest.get("base_manifest_sha256") != hashlib.sha256(original_path.read_bytes()).hexdigest()
+                or set(manifest["runtime_files"]) != set(original["runtime_files"])):
+            print("Invalid qualified runtime lineage", file=sys.stderr)
+            return 1
+        changed = sorted(k for k in manifest["runtime_files"]
+                         if manifest["runtime_files"][k] != original["runtime_files"][k])
+        if changed != manifest["changed_runtime_files"]:
+            print("Qualified runtime delta differs from manifest", file=sys.stderr)
+            return 1
     expected = manifest["runtime_files"]
     actual = {p.relative_to(root).as_posix() for p in (root / "src").rglob("*") if p.is_file()}
     actual.update(("Cargo.toml", "Cargo.lock", "arena.py", "arena-flags.json"))
@@ -22,7 +37,7 @@ def main():
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
-    print(f"Verified {len(expected)} runtime files against {manifest['original_commit']}")
+    print(f"Verified {len(expected)} runtime files against {manifest.get('qualification_run', manifest['original_commit'])}")
     print("Original src tree:", manifest["original_src_tree"])
     return 0
 

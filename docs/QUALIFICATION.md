@@ -75,3 +75,28 @@ successful proof checks, and full Mathlib acceptance is not established.
 The abstract Lean model under `formal/` establishes limited environment laws
 under explicit typing assumptions. It does not establish refinement or
 soundness of the Rust implementation.
+
+
+## Native NDJSON 3.2.0 ordinary-core migration (2026-11-27)
+
+[Qualified run 45938613850](https://github.com/metalogiclabs/nucleus/actions/runs/45938613850)
+and [retained artifact 15172160773](https://github.com/metalogiclabs/nucleus/actions/runs/45938613850/artifacts/15172160773)
+establish the exact runtime file hashes in
+[the separate qualification manifest](../evidence/native32-ordinary-qualification-20261127.json).
+The original import manifest remains historical evidence.
+
+Two separate 356-input replays (current native-export cohort and earlier
+preview cohort) each yielded 62 ACCEPT, 51 REJECT, and 243 UNKNOWN, with
+no incorrect decisive results. All 38 decisions lost in the exporter
+migration were recovered; three additional universe cases were accepted.
+The core accepts only strictly validated safe ordinary definitions,
+opaque theorems and dependent-form lets. An ill-formed final axiom may
+be rejected; a valid axiom does not authorize acceptance. No new
+inductive, projection, quotient or literal authority is introduced.
+
+Four independently sourced regressions yielded UNKNOWN, UNKNOWN,
+REJECT, UNKNOWN respectively (valid and invalid casesOn, invalid
+Nat.log2, missing Nat.succ). The invalid casesOn transport error was
+eliminated, but its semantic rejection and broader recursive checking
+remain unresolved. These are bounded local qualification results, not
+a new official Arena ranking or a whole-Mathlib result.
