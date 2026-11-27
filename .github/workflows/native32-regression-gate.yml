@@ -1,4 +1,4 @@
-name: Nucleus pinned native 3.2 and upstream regression gate
+name: Nucleus expression identity order candidate and protected replay
 on:
   push:
     branches: [research/native32-regression-gate-20261127]
@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.99.1'
-      - name: Verify unchanged qualified runtime and build exact launcher
+      - name: Verify qualified runtime and build isolated expression-order candidate
         run: |
           set -euo pipefail
           mkdir -p evidence-run
@@ -26,6 +26,91 @@ jobs:
           git rev-parse HEAD:src > evidence-run/source-tree.txt
           test "$(git rev-parse HEAD:src)" = 362242c265ee2b1758645c78ad141ad78bf6f8c2
           python3 scripts/verify_source_import.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation.rs')
+          s=p.read_text()
+          def once(a,b):
+              global s
+              assert s.count(a)==1,(a,s.count(a))
+              s=s.replace(a,b)
+          once('collections::HashSet, io::','collections::{HashMap, HashSet}, io::')
+          marker='fn telescope(exprs: &[Value], mut id: usize)'
+          table=r'''// Expression IDs are identities, not stream ordinals. The export
+          // may introduce a high-numbered node before a low-numbered one.
+          // Keep dependency order independently and never allocate by max ID.
+          #[derive(Default)]
+          struct ExpressionTable {
+              entries: HashMap<usize, (usize, Value)>,
+          }
+          impl ExpressionTable {
+              fn insert(&mut self, id: usize, row: Value) -> Checked<()> {
+                  let ordinal = self.entries.len();
+                  if self.entries.contains_key(&id) { return Err("duplicate expression ID"); }
+                  self.entries.insert(id, (ordinal, row));
+                  Ok(())
+              }
+              fn get(&self, id: usize) -> Option<&Value> {
+                  self.entries.get(&id).map(|(_, row)| row)
+              }
+              fn earlier(&self, child: usize, parent: usize) -> bool {
+                  match (self.entries.get(&child), self.entries.get(&parent)) {
+                      (Some((c, _)), Some((p, _))) => c < p,
+                      _ => false,
+                  }
+              }
+              // Preserve the predecessor's complete-ID-set requirement.
+              // Only record order changes; sparse admission is not claimed.
+              fn dense(&self) -> bool {
+                  self.entries.keys().all(|id| *id < self.entries.len())
+              }
+          }
+          
+          '''
+          once(marker,table+marker.replace('&[Value]','&ExpressionTable'))
+          once('if domain >= id || body >= id {','if !exprs.earlier(domain, id) || !exprs.earlier(body, id) {')
+          once('fn contains_family(exprs: &[Value],','fn contains_family(exprs: &ExpressionTable,')
+          once('if child >= id { return Err("forward or cyclic expression edge"); }','if !exprs.earlier(child, id) { return Err("forward or cyclic expression edge"); }')
+          once('fn check_block(block: &Value, exprs: &[Value],','fn check_block(block: &Value, exprs: &ExpressionTable,')
+          once('let mut exprs = Vec::<Value>::new();','let mut exprs = ExpressionTable::default();')
+          once('if integer(n)? != exprs.len() { return Err("nonconsecutive expression IDs"); }\n            exprs.push(row);','let id = integer(n)?;\n            exprs.insert(id, row)?;')
+          once('    if whole_export.as_ref().is_some_and(|rows| nullary::admits(rows)) {','    if !exprs.dense() { return Err("missing expression IDs"); }\n    // Whole-export admission remains unchanged, including strict table checks.\n    if whole_export.as_ref().is_some_and(|rows| nullary::admits(rows)) {')
+          marker='    #[test]\n    fn no_warrant_from_empty_or_malformed_new_input()'
+          tests=r'''    #[test]
+              fn expression_identity_and_dependency_order_are_distinct() {
+                  let mut t = ExpressionTable::default();
+                  let sort = |id:usize| serde_json::json!({"ie":id,"sort":0});
+                  t.insert(2,sort(2)).unwrap();
+                  t.insert(1,sort(1)).unwrap();
+                  t.insert(0,serde_json::json!({"ie":0,"forallE":{"type":2,"body":1}})).unwrap();
+                  assert!(t.dense());
+                  assert!(t.earlier(2,0));
+                  assert!(!t.earlier(0,2));
+                  assert!(!t.earlier(2,2));
+                  assert!(telescope(&t,0).is_ok());
+                  assert!(t.insert(2,sort(2)).is_err());
+                  let mut forward = ExpressionTable::default();
+                  forward.insert(0,serde_json::json!({"ie":0,"forallE":{"type":2,"body":1}})).unwrap();
+                  forward.insert(2,sort(2)).unwrap();
+                  forward.insert(1,sort(1)).unwrap();
+                  assert!(telescope(&forward,0).is_err());
+              }
+              #[test]
+              fn unordered_table_is_not_admission_authority() {
+                  let input = b"{\"ie\":1,\"sort\":0}\n{\"ie\":0,\"sort\":0}\n";
+                  assert_eq!(check(std::io::Cursor::new(input),true),Ok(Outcome::Unknown));
+                  let dup = b"{\"ie\":0,\"sort\":0}\n{\"ie\":0,\"sort\":0}\n";
+                  assert!(check(std::io::Cursor::new(dup),true).is_err());
+              }
+          '''
+          once(marker,tests+marker)
+          p.write_text(s)
+          PY
+          git diff --exit-code -- . ':!src/renovation.rs'
+          git diff -- src/renovation.rs > evidence-run/expr-order-candidate.patch
+          git add src/renovation.rs
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse :src/renovation.rs > evidence-run/candidate-blob.txt
           python3 scripts/test.py
           python3 -m unittest discover -s tests_py
           cargo build --locked --release --features diagnostics
@@ -55,7 +140,7 @@ jobs:
               print('NEW_REGRESSION '+json.dumps(row),flush=True)
               (out/'new-regressions.json').write_text(json.dumps(rows,indent=2)+'\n')
           assert len(rows)==4
-          assert all(r['exit'] in (r['expected'],2) for r in rows), 'Incorrect decisive verdict or execution error'
+          # Do not hide incomplete or wrong results; final gate runs after corpus replay.
           PY
       - name: Retrieve immutable native export and official Nucleus receipts
         run: |
@@ -99,9 +184,20 @@ jobs:
           assert not changes,'Frozen baseline drift'
           assert counts=={'0':30,'1':42,'2':284},counts
           PY
+      - name: Enforce predeclared transport-only result
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('evidence-run')
+          r=json.loads((p/'new-regressions.json').read_text()); c=json.loads((p/'corpus-summary.json').read_text())
+          assert len(r)==4 and [x['exit'] for x in r]==[2,2,1,2],r
+          assert not c['changed'] and c['input_count']==356 and c['counts']=={'0':30,'1':42,'2':284},c
+          print('Transport-only candidate: ERROR -> UNKNOWN; 356 exact verdicts preserved. Semantic completeness not established.')
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: nucleus-pinned-native32-regression-gate
+          name: nucleus-expression-order-candidate
           path: evidence-run/
           retention-days: 60
