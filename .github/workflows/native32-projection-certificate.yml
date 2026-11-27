@@ -1,0 +1,191 @@
+name: Native 3.2 certified projection transport on exact PR 6
+on:
+  push:
+    branches: [test/native32-projection-certificate-12ce8435]
+    paths: ['.github/workflows/native32-projection-certificate.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Verify exact parent and frozen census archive
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          P=c34ceab8bfa6c233bd272b95a280954aa32fad61
+          git merge-base --is-ancestor "$P" HEAD
+          git diff --exit-code "$P" HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          test "$(git rev-parse HEAD:src)" = 2a3a066c4232b1edf733585e68f1c09221651324
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15230979584/zip > evidence-run/census.zip
+          printf '%s  %s\n' 9820e6486f696845c1c0ea6f5d1829a512b55d5f927235b63ef9b56d41c7175f evidence-run/census.zip | sha256sum -c -
+          cargo build --locked --release --features diagnostics > evidence-run/baseline-build.log 2>&1
+          cp target/release/metatron-kernel evidence-run/baseline
+      - name: Add projection authority only after full source-family reconstruction
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def patch(path,pairs):
+              p=Path(path);s=p.read_text()
+              for a,b in pairs:
+                  assert s.count(a)==1,(path,a,s.count(a))
+                  s=s.replace(a,b)
+              p.write_text(s)
+          patch('src/renovation/nullary/parametric.rs',[
+              ('    pub(super) reduction:Option<(crate::id::NameId,crate::machine::RecursorReduction)>,',
+               '    pub(super) reduction:Option<(crate::id::NameId,crate::machine::RecursorReduction)>,\n    pub(super) projection:Option<(crate::id::NameId,crate::machine::ProjectionSpec)>,'),
+              ('        reduction:Some((name(r)?,reduction))})',
+               '        reduction:Some((name(r)?,reduction)),projection:None})'),
+              ('signature(rec,OpaqueInductiveKind::Recursor)?],reduction:Some((name(r)?,RecursorReduction{',
+               'signature(rec,OpaqueInductiveKind::Recursor)?],projection:None,reduction:Some((name(r)?,RecursorReduction{'),
+              ('        Some(CertifiedFamily{signatures:out,reduction})',
+               '''        // The reconstructed family (not its exported flags alone) owns
+                  // the constructor telescope. Keep eta disabled in this ablation.
+                  // Restrict the first bridge to families whose sort is never Prop.
+                  let (_,tail)=peel(f.ty.clone(),f.params)?;
+                  let projection=if f.projections && !eval_zero(&as_sort(&tail)?,false){
+                      use crate::machine::{ProjectionSpec,ProjectionFieldType};
+                      let [ctor]=arr(b,"ctors")? else{return None};
+                      let [fields]=f.fields.as_slice() else{return None};
+                      let mut body=num(ctor,"type")?;
+                      for _ in 0..f.params { body=t.binder(body,true)?.1; }
+                      let mut field_types=Vec::new();
+                      for _ in fields {
+                          let (domain,rest)=t.binder(body,true)?;
+                          field_types.push(ProjectionFieldType::Derived(ExprId(u64::try_from(domain).ok()?)));
+                          body=rest;
+                      }
+                      let name=|i:usize|u64::try_from(i).ok().map(NameId);
+                      Some((name(f.name)?,ProjectionSpec{
+                          constructor:name(num(ctor,"name")?)?,num_params:f.params,
+                          field_types,eta_expandable:false,
+                      }))
+                  }else{None};
+                  Some(CertifiedFamily{signatures:out,reduction,projection})'''),
+          ])
+          patch('src/renovation/nullary/composite.rs',[
+              ('            else{tables.add(row)?;}',
+               '            else if keys(row,&["ie","proj"]){tables.add_projection(row)?;}\n            else{tables.add(row)?;}'),
+              ('                env=derivation.finish();',
+               '                env=derivation.finish();\n                if let Some((name,spec))=cert.projection{\n                    env=env.install_projection_spec(name,spec).ok()?;\n                }'),
+          ])
+          PY
+          git diff --exit-code -- . ':!src/renovation/nullary/parametric.rs' ':!src/renovation/nullary/composite.rs' ':!evidence-run'
+          git diff -- src > evidence-run/candidate.patch
+          git add src/renovation/nullary/parametric.rs src/renovation/nullary/composite.rs
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          python3 scripts/test.py > evidence-run/rust-tests.log 2>&1
+          python3 -m unittest discover -s tests_py > evidence-run/python-tests.log 2>&1
+          cargo build --locked --release --features diagnostics > evidence-run/candidate-build.log 2>&1
+          sha256sum evidence-run/baseline target/release/metatron-kernel arena.py arena-flags.json > evidence-run/binaries.sha256
+      - name: Install exact renovated reference kernel
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4-pr-releases:pr-release-16595-a8ad4db
+          "$HOME/.elan/bin/elan" run leanprover/lean4-pr-releases:pr-release-16595-a8ad4db lean --version > evidence-run/oracle-version.txt
+      - name: Replay exact cohorts and source-projection adversarial controls
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,subprocess,tarfile,zipfile
+          O=pathlib.Path('evidence-run')
+          def digest(raw):return hashlib.sha256(raw).hexdigest()
+          def archive(raw):
+              z=zipfile.ZipFile(io.BytesIO(raw));assert z.testzip() is None;return z
+          def inputs(raw):
+              z=archive(raw)
+              with tarfile.open(fileobj=io.BytesIO(z.read('lean-arena-tests.tar.gz'))) as t:
+                  return {m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          def save(name,val):(O/name).write_text(json.dumps(val,indent=2,sort_keys=True)+'\n')
+          env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))}
+          env.update(json.loads(pathlib.Path('arena-flags.json').read_text()))
+          def run(raw,baseline=False):
+              if len(raw)>10*1024*1024:return 2,'input byte allowance'
+              cmd=[str((O/'baseline').resolve())] if baseline else ['python3','arena.py']
+              p=subprocess.run(cmd,input=raw,capture_output=True,env=env,timeout=120)
+              return p.returncode,p.stderr.decode(errors='replace')
+          z=archive((O/'census.zip').read_bytes())
+          assert digest(z.read('qualified.zip'))=='1c42bbed916ae0a4c1b53c9d94b680a26d405fd17cb7235dd61137b186985cb0'
+          q=archive(z.read('qualified.zip'))
+          pk=archive(q.read('base.zip'));k=archive(pk.read('base.zip'));identity=archive(k.read('base.zip'))
+          iota=archive(identity.read('base.zip'));composition=archive(iota.read('composition.zip'));ordinary=archive(composition.read('base.zip'));old=archive(ordinary.read('prior-qualification.zip'))
+          cohorts={
+            'preview':(inputs(z.read('corpus.zip')),{r['name']:{**r,'exit':r['baseline']} for r in map(json.loads,z.read('rows.jsonl').splitlines())}),
+            'current':(inputs(ordinary.read('test-tarball.zip')),{r['name']:r for r in json.loads(q.read('current-rows.json'))}),
+            'prior':(inputs(old.read('tarball.zip')),{r['name']:r for r in json.loads(q.read('prior-rows.json'))}),
+          }
+          summaries={};violations=[]
+          for cohort,(ins,previous) in cohorts.items():
+              assert len(ins)==356 and set(ins)==set(previous),cohort
+              rows=[]
+              for name,data in ins.items():
+                  row=previous[name];assert digest(data)==row['sha256'],name
+                  before,_=run(data,True);after,err=run(data)
+                  if before!=row['exit'] or (after!=before and not (before==2 and after=={'accept':0,'reject':1}.get(row['expected']))):
+                      violations.append((cohort,name,before,after,row['exit'],row['expected']))
+                  rows.append({'name':name,'sha256':digest(data),'expected':row['expected'],'before':before,'exit':after,'stderr':err})
+              changes=[r for r in rows if r['before']!=r['exit']]
+              summary={'count':len(rows),'counts':dict(collections.Counter(r['exit'] for r in rows)),'changes':changes}
+              save(cohort+'-rows.json',rows);summaries[cohort]=summary
+              print('COHORT',cohort,json.dumps(summary),flush=True)
+          save('summary.json',summaries);save('violations.json',violations)
+          # Exact original fixture preservation: use the existing published regression
+          # suites (Rust/Python above), plus source-generated hostile projection controls.
+          ins,prev=cohorts['preview']
+          names=['tutorial/084_Prod.snd','tutorial/086_PSigma.snd','renovation/056_pPairFst','tutorial/088_projNotStruct','renovation/058_pNoProjFst']
+          fixtures={name.replace('/','-'):(ins[name],{'accept':0,'reject':1}[prev[name]['expected']]) for name in names}
+          source=ins['tutorial/084_Prod.snd']
+          def mutate(which):
+              rows=[json.loads(l) for l in source.splitlines()]
+              if which=='out-of-range':
+                  next(r['proj'] for r in rows if 'proj' in r)['idx']=999
+              elif which=='wrong-family':
+                  next(r['proj'] for r in rows if 'proj' in r)['typeName']=next(r['inductive']['ctors'][0]['name'] for r in rows if 'inductive' in r)
+              elif which=='forged-field-count':
+                  next(r['inductive']['ctors'][0] for r in rows if 'inductive' in r)['numFields']+=1
+              elif which=='forbidden-projection':
+                  item=next(r['inductive']['types'][0] for r in rows if 'inductive' in r)
+                  item['hasProjections']=False;item['hasEta']=False
+              else:raise AssertionError(which)
+              return ('\n'.join(json.dumps(r,separators=(',',':')) for r in rows)+'\n').encode()
+          for name in ('out-of-range','wrong-family','forged-field-count','forbidden-projection'):
+              fixtures['mut-'+name]=(mutate(name),1)
+          d=O/'controls';d.mkdir();controls=[]
+          for name,(raw,expected) in fixtures.items():
+              p=d/(name+'.ndjson');p.write_bytes(raw)
+              before,_=run(raw,True);after,err=run(raw)
+              official=subprocess.run(['elan','run','leanprover/lean4-pr-releases:pr-release-16595-a8ad4db','leanchecker','--from-export',str(p)],capture_output=True,timeout=120)
+              row={'name':name,'sha256':digest(raw),'expected':expected,'before':before,'exit':after,'stderr':err,'official':official.returncode,'official_stderr':official.stderr.decode(errors='replace'),'official_stdout':official.stdout.decode(errors='replace')}
+              controls.append(row);save('controls.json',controls)
+              print('CONTROL',json.dumps(row),flush=True)
+              assert (official.returncode==0)==(expected==0),row
+              assert after in (expected,2) and (before==2 or before==after),row
+          assert not violations,violations
+          assert any(r['before']==2 and r['exit']==0 and 'proj' in prev[r['name']]['cluster'].lower() for r in summaries['preview']['changes']),summaries['preview']
+          print('PROJECTION_BRIDGE_QUALIFIED',flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-projection-certificate
+          path: evidence-run/
+          retention-days: 60
