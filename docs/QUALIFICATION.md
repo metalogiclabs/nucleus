@@ -121,3 +121,22 @@ and the [new source manifest](../evidence/native32-computation-qualification-202
 These are bounded local results, not an updated official Arena score.
 General indexed equality, recursion, eta, K and full Mathlib remain
 outside the established new capability.
+
+
+## Native indexed identity reconstruction (2026-11-27)
+
+[Qualification 45963087833](https://github.com/metalogiclabs/nucleus/actions/runs/45963087833)
+established ten new correct native ACCEPTs, including eqType,
+eqRec, boolRecEqns and prodRecEqns. The current cohort has
+92 ACCEPT, 51 REJECT and 213 UNKNOWN (356 inputs). The prior cohort
+remains 63A/51R/242U. No protected decisive verdict was lost.
+All twelve earlier native iota controls and four external fixtures
+were preserved. Ten new controls yielded 1 ACCEPT, 3 REJECT and
+6 UNKNOWN (including false Boolean equality); no false ACCEPT.
+
+The indexed certificate reconstructs the entire identity family,
+constructor, recursor telescope and rule body. It promotes only
+opaque signatures, not indexed reduction or K authority. The
+exact runtime manifest and original fixtures are retained.
+Full indexed/recursive support and whole-Mathlib acceptance are
+not established.
