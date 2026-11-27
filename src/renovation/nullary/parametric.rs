@@ -104,6 +104,7 @@ fn from_expr(t:&Tables,id:usize,fuel:&mut Budget,depth:usize)->Option<T>{
         Expr::Pi(a,b)=>Term::P(from_expr(t,*a,fuel,depth+1)?,from_expr(t,*b,fuel,depth+1)?),
         Expr::Lam(a,b)=>Term::L(from_expr(t,*a,fuel,depth+1)?,from_expr(t,*b,fuel,depth+1)?),
         Expr::Proj(n,i,s)=>Term::Proj(*n,*i,from_expr(t,*s,fuel,depth+1)?),
+        Expr::OrdinaryLet=>return None,
     };
     Some(Rc::new(e))
 }

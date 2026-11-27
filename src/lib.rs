@@ -47,7 +47,16 @@ pub fn run<R: BufRead>(mut reader: R) -> Verdict {
         if !verified_header {
             return Verdict::Error;
         }
-        return match renovation::check(tail, verified_header) {
+        let result=if version.as_deref()==Some("3.2.0") {
+            renovation::check_native(tail,&header)
+        } else {
+            renovation::check(tail,verified_header)
+        };
+        return match result {
+            Ok(renovation::Outcome::AcceptOrdinary) => {
+                eprintln!("NUCLEUS_RENOVATION_ADMISSION: ordinary-native-core");
+                Verdict::Accept
+            }
             Ok(renovation::Outcome::Reject(reason)) => {
                 eprintln!("NUCLEUS_RENOVATION_REFUTATION: {reason}");
                 Verdict::Reject

@@ -111,6 +111,36 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedExport, ParseError> {
     Ok(export)
 }
 
+/// Native ordinary declarations, already structurally checked by the
+/// renovation envelope. No version relabeling or legacy inductive
+/// parsing is permitted, even if an internal caller is mistaken.
+pub(crate) fn parse_ordinary_native(
+    meta_value: Value, rows: &[Value],
+) -> Result<ParsedExport, ParseError> {
+    let mut export = ParsedExport {
+        meta: parse_meta_version(meta_value, "3.2.0")?,
+        names: IdTable::default(),
+        levels: IdTable::default(),
+        exprs: IdTable::default(),
+        declarations: Vec::new(),
+    };
+    export.levels.insert(LevelId(0), Level::Zero)?;
+    for (i, value) in rows.iter().enumerate() {
+        if value.get("in").is_none() && value.get("il").is_none()
+            && value.get("ie").is_none() && value.get("def").is_none()
+            && value.get("thm").is_none() && value.get("axiom").is_none() {
+            return Err(malformed(i+2, "nonordinary native declaration"));
+        }
+        parse_record(&mut export, value.clone(), i+2)?;
+    }
+    if export.declarations.is_empty() || export.declarations.iter().enumerate().any(|(i,d)|
+        !matches!(d, Declaration::Definition { .. } | Declaration::Theorem { .. })
+        && !(i+1==export.declarations.len() && matches!(d, Declaration::Axiom { .. }))) {
+        return Err(ParseError::UnsupportedFormat("nonordinary native declaration".into()));
+    }
+    Ok(export)
+}
+
 impl ParsedExport {
     pub fn resolve(self) -> Result<ResolvedExport, ParseError> {
         for name in self.names.values() {
@@ -157,6 +187,10 @@ fn parse_json(line: &str, line_number: usize) -> Result<Value, ParseError> {
 }
 
 fn parse_meta(value: Value) -> Result<Meta, ParseError> {
+    parse_meta_version(value, "3.1.0")
+}
+
+fn parse_meta_version(value: Value, expected: &str) -> Result<Meta, ParseError> {
     let Some(version) = value
         .get("meta")
         .and_then(|meta| meta.get("format"))
@@ -165,7 +199,7 @@ fn parse_meta(value: Value) -> Result<Meta, ParseError> {
     else {
         return Err(ParseError::MissingMeta);
     };
-    if version != "3.1.0" {
+    if version != expected {
         return Err(ParseError::UnsupportedFormat(version.to_owned()));
     }
     Ok(Meta {
