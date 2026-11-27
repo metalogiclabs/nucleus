@@ -1,0 +1,277 @@
+name: Certified native 3.2 recursor computation
+on:
+  push:
+    branches: [research/native32-certified-iota-20261127]
+    paths: ['.github/workflows/native32-certified-iota.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Restore exact qualified composition source and both frozen cohorts
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          git merge-base --is-ancestor b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d HEAD
+          git diff --exit-code b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15173140598/zip > evidence-run/composition.zip
+          printf '%s  %s\n' 3bff9bdb17692b74ca729b9e88a0d3de067de92b0a30fcee687b3e4caeba3f98 evidence-run/composition.zip | sha256sum -c -
+          python3 - <<'PY'
+          import pathlib,zipfile
+          p=pathlib.Path('evidence-run')
+          z=zipfile.ZipFile(p/'composition.zip'); assert z.testzip() is None
+          assert z.read('candidate-src-tree.txt').decode().strip()=='f513371efc844364bb62ef3a556a43f82164c76c'
+          (p/'composition.patch').write_bytes(z.read('composite.patch'))
+          PY
+          git apply --index evidence-run/composition.patch
+          test "$(git rev-parse "$(git write-tree):src")" = f513371efc844364bb62ef3a556a43f82164c76c
+          cargo build --locked --release --features diagnostics
+          cp target/release/metatron-kernel evidence-run/composition-baseline
+          sha256sum evidence-run/composition-baseline > evidence-run/baseline-binary.sha256
+      - name: Generate native positive and negative computation witnesses
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          export PATH="$HOME/.elan/bin:$PATH"
+          git clone --quiet https://github.com/leanprover/lean-kernel-arena-beta.git "$RUNNER_TEMP/arena"
+          git -C "$RUNNER_TEMP/arena" checkout --quiet 60654ab87757ee8b07e3a292fc546f18e8131a27
+          cd "$RUNNER_TEMP/arena/tutorial"
+          test "$(cat lean-toolchain)" = leanprover/lean4-pr-releases:pr-release-16595-cb63311
+          lean --version
+          lake build Tutorial.Meta
+          cat > IotaGate.lean <<'LEAN'
+          import Tutorial.Meta
+          good_def boolGood : @Bool.rec (fun _ => Type) (Prop → Prop) Prop Bool.false :=
+            fun p : Prop => p
+          bad_def boolBad : @Bool.rec (fun _ => Type) (Prop → Prop) Prop Bool.true :=
+            unchecked (fun p : Prop => p)
+          good_def boolOther : @Bool.rec (fun _ => Type) (Prop → Prop) Prop Bool.true :=
+            ∀ p : Prop, p
+          good_def fieldGood : @Prod.rec Type Type (fun _ => Type)
+              (fun a b => a) (Prod.mk (Prop → Prop) Prop) := fun p : Prop => p
+          bad_def fieldBad : @Prod.rec Type Type (fun _ => Type)
+              (fun a b => b) (Prod.mk (Prop → Prop) Prop) := unchecked (fun p : Prop => p)
+          good_def surplusGood : (@Bool.rec (fun _ => Type → Type) (fun A => A)
+              (fun _ => Prop) Bool.false) (Prop → Prop) := fun p : Prop => p
+          bad_def surplusBad : (@Bool.rec (fun _ => Type → Type) (fun A => A)
+              (fun _ => Prop) Bool.true) (Prop → Prop) := unchecked (fun p : Prop => p)
+          LEAN
+          mkdir -p "$GITHUB_WORKSPACE/evidence-run/native"
+          cp IotaGate.lean "$GITHUB_WORKSPACE/evidence-run/"
+          lake env lean -o .lake/build/lib/lean/IotaGate.olean IotaGate.lean
+          for name in boolGood boolBad boolOther fieldGood fieldBad surplusGood surplusBad; do
+            lake env leanexport IotaGate -- "$name" > "$GITHUB_WORKSPACE/evidence-run/native/$name.ndjson"
+          done
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess,hashlib
+          p=pathlib.Path(os.environ['GITHUB_WORKSPACE'])/'evidence-run'; out=[]
+          for f in sorted((p/'native').glob('*.ndjson')):
+              raw=f.read_bytes(); rows=[json.loads(l) for l in raw.splitlines()]
+              meta=rows[0]['meta']
+              assert meta['format']['version']=='3.2.0' and meta['lean']['githash']=='cb63311203a44983a2326b83fcb16dbbd5c5130a'
+              assert sum('inductive' in r for r in rows)==1
+              assert sum('def' in r for r in rows)==1
+              assert not any('axiom' in r or 'quot' in r or 'thm' in r for r in rows)
+              family=next(r['inductive'] for r in rows if 'inductive' in r)
+              rec=family['recs'][0]['name']
+              expr={r['ie']:r for r in rows if 'ie' in r};d=next(r['def'] for r in rows if 'def' in r)
+              todo=[d['type']]; seen=set(); found=False
+              while todo:
+                  i=todo.pop()
+                  if i in seen: continue
+                  seen.add(i);r=expr[i]
+                  if r.get('const',{}).get('name')==rec:found=True
+                  for k,fields in [('app',('fn','arg')),('lam',('type','body')),('forallE',('type','body')),('letE',('type','value','body'))]:
+                      if k in r:todo.extend(r[k][a] for a in fields)
+              assert found,f.name
+              c=subprocess.run(['lake','env','leanchecker','--from-export',str(f)],capture_output=True,timeout=120)
+              expect='Bad' not in f.stem
+              assert (c.returncode==0)==expect,(f.name,c.returncode,c.stdout,c.stderr)
+              out.append({'name':f.stem,'sha256':hashlib.sha256(raw).hexdigest(),'expected':0 if expect else 1,'official_exit':c.returncode,'official_stdout':c.stdout.decode(errors='replace'),'official_stderr':c.stderr.decode(errors='replace')})
+          assert len(out)==7
+          (p/'official-native.json').write_text(json.dumps(out,indent=2)+'\n')
+          print('OFFICIAL_NATIVE '+json.dumps(out),flush=True)
+          PY
+      - name: Install source-derived computation certificates
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def edit(path,changes):
+              p=Path(path);s=p.read_text()
+              for a,b in changes:
+                  assert s.count(a)==1,(path,a,s.count(a))
+                  s=s.replace(a,b)
+              p.write_text(s)
+          # The certificate can only originate in checked_family_with_prior,
+          # which checked the complete exact recursor telescope and every RHS.
+          edit('src/renovation/nullary/parametric.rs',[
+              ('// Only successful full reconstruction produces opaque signatures.',r'''// Only successful full reconstruction produces opaque signatures and
+          // constructor-indexed computation authority. K, small elimination
+          // and empty-rule recursors never receive an execution certificate.
+          pub(super) struct CertifiedFamily {
+              pub(super) signatures:Vec<crate::inductive::DerivedSignature>,
+              pub(super) reduction:Option<(crate::id::NameId,crate::machine::RecursorReduction)>,
+          }'''),
+              ('->Option<Vec<crate::inductive::DerivedSignature>> {','->Option<CertifiedFamily> {'),
+              ('        Some(out)\n    }\n}\n\nmod projection;',r'''        let ind=arr(b,"types")?.first()?;
+                  let rec=arr(b,"recs")?.first()?;
+                  let features=Features::read(ind).ok()?;
+                  let rules=arr(rec,"rules")?;
+                  let reduction=if features.large && !features.k && !rules.is_empty(){
+                      use crate::machine::{RecursorReduction,RecursorRule};
+                      let name=|i:usize|u64::try_from(i).ok().map(NameId);
+                      let params=|row:&Value|numbers(row,"levelParams")?.into_iter().map(name).collect::<Option<Vec<_>>>();
+                      let constructors=arr(b,"ctors")?;
+                      // Full reconstruction already checked identical ordering,
+                      // levels, parameters, field count, and derived RHS.
+                      need(constructors.len()==rules.len())?;
+                      let mut checked=Vec::new();
+                      for (ctor,rule) in constructors.iter().zip(rules){
+                          need(num(ctor,"name")?==num(rule,"ctor")?)?;
+                          checked.push(RecursorRule{
+                              constructor:name(num(ctor,"name")?)?,
+                              constructor_level_params:params(ctor)?,
+                              num_params:num(ctor,"numParams")?,
+                              num_fields:num(ctor,"numFields")?,
+                              rhs:ExprId(u64::try_from(num(rule,"rhs")?).ok()?),
+                          });
+                      }
+                      Some((name(num(rec,"name")?)?,RecursorReduction{
+                          k:false,num_params:num(rec,"numParams")?,num_indices:0,
+                          level_params:params(rec)?,rules:checked,
+                      }))
+                  }else{None};
+                  Some(CertifiedFamily{signatures:out,reduction})
+              }
+          }
+
+          mod projection;''')])
+          edit('src/renovation/nullary/composite.rs',[
+              ('//! parser; no iota, eta, projection, K, literal or axiom authority.',
+               '//! parser; only reconstructed constructor-specific iota is enabled.\n//! No eta, projection, K, literal or axiom authority is installed.'),
+              ('use crate::inductive::{ClosedNonrecursiveDerivation,DerivedSignature};','use crate::inductive::ClosedNonrecursiveDerivation;'),
+              ('enum Stage { Family(Vec<DerivedSignature>), Ordinary(usize) }','enum Stage { Family(parametric::CertifiedFamily), Ordinary(usize) }'),
+              ('need(cert.iter().all(|s|names.insert(s.name)))?;','need(cert.signatures.iter().all(|s|names.insert(s.name)))?;'),
+              ('Stage::Family(signatures)=>{','Stage::Family(cert)=>{'),
+              ('derivation.promote_all(&export,signatures,limits.judgment_steps,policy).ok()?;\n                env=derivation.finish();',
+               'derivation.promote_all(&export,cert.signatures,limits.judgment_steps,policy).ok()?;\n                env=derivation.finish();\n                if let Some((name,reduction))=cert.reduction{\n                    env=env.install_recursor_reduction(name,reduction).ok()?;\n                }')])
+          PY
+          git diff --exit-code -- . ':!src/renovation/nullary/parametric.rs' ':!src/renovation/nullary/composite.rs'
+          git diff -- src > evidence-run/iota.patch
+          git add src
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          python3 scripts/test.py
+          python3 -m unittest discover -s tests_py
+          cargo build --locked --release --features diagnostics
+          sha256sum target/release/metatron-kernel arena.py arena-flags.json > evidence-run/candidate-binary.sha256
+      - name: Run native A/B and preserve all prior semantic decisions
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,subprocess,tarfile,zipfile
+          p=pathlib.Path('evidence-run')
+          z=zipfile.ZipFile(p/'composition.zip');base=zipfile.ZipFile(io.BytesIO(z.read('base.zip')));assert base.testzip() is None
+          assert hashlib.sha256(z.read('base.zip')).hexdigest()=='7dc78b7df4af5d35db050b9c438bb06aa359d1e326c02c73104d212668286180'
+          def inputs(zip_bytes):
+              zz=zipfile.ZipFile(io.BytesIO(zip_bytes));assert zz.testzip() is None
+              tar=tarfile.open(fileobj=io.BytesIO(zz.read('lean-arena-tests.tar.gz')))
+              return {m.name.split('/',1)[1].removesuffix('.ndjson'):tar.extractfile(m).read() for m in tar.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          def run(raw,baseline=False):
+              if len(raw)>10*1024*1024:return 2,'input byte allowance'
+              if baseline:
+                  env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))}
+                  env.update(json.loads(pathlib.Path('arena-flags.json').read_text()))
+                  q=subprocess.run([str((p/'composition-baseline').resolve())],input=raw,capture_output=True,env=env,timeout=120)
+              else:q=subprocess.run(['python3','arena.py'],input=raw,capture_output=True,timeout=120)
+              return q.returncode,q.stderr.decode(errors='replace')
+          native=[]
+          for r in json.loads((p/'official-native.json').read_text()):
+              raw=(p/'native'/(r['name']+'.ndjson')).read_bytes()
+              assert hashlib.sha256(raw).hexdigest()==r['sha256']
+              before,be=run(raw,True); after,ae=run(raw)
+              row={**r,'before':before,'after':after,'before_stderr':be,'after_stderr':ae}
+              native.append(row);print('NATIVE_AB '+json.dumps(row),flush=True)
+          (p/'native-ab.json').write_text(json.dumps(native,indent=2)+'\n')
+          # Mutate already-native bytes without changing their headers:
+          # wrong rule constructor, swapped rule RHS, missing rule, fake K.
+          a=[json.loads(l) for l in (p/'native/boolGood.ndjson').read_bytes().splitlines()]
+          i=next(i for i,r in enumerate(a) if 'inductive' in r)
+          def mut(f):
+              rows=json.loads(json.dumps(a));f(rows[i]['inductive'])
+              return b''.join(json.dumps(r,separators=(',',':')).encode()+b'\n' for r in rows)
+          mutations=[
+            ('swapped-rhs',lambda b:b['recs'][0]['rules'][0].update(rhs=b['recs'][0]['rules'][1]['rhs'])),
+            ('wrong-constructor',lambda b:b['recs'][0]['rules'][0].update(ctor=b['recs'][0]['rules'][1]['ctor'])),
+            ('missing-rule',lambda b:b['recs'][0]['rules'].pop()),
+            ('fake-k',lambda b:(b['types'][0].update(isK=True),b['recs'][0].update(k=True))),
+            ('small-elim-with-rules',lambda b:b['types'][0].update(hasLargeElim=False)),
+          ]
+          controls=[]
+          for name,f in mutations:
+              raw=mut(f);(p/'native'/('mut-'+name+'.ndjson')).write_bytes(raw)
+              code,err=run(raw); controls.append({'name':name,'exit':code,'stderr':err,'sha256':hashlib.sha256(raw).hexdigest()})
+              print('MUTATION '+json.dumps(controls[-1]),flush=True)
+          (p/'iota-controls.json').write_text(json.dumps(controls,indent=2)+'\n')
+          current=inputs(base.read('test-tarball.zip'))
+          oldzip=zipfile.ZipFile(io.BytesIO(base.read('prior-qualification.zip')));assert oldzip.testzip() is None
+          old=inputs(oldzip.read('tarball.zip'))
+          for cohort,ins in [('current',current),('prior',old)]:
+              before={r['name']:r for r in json.loads(z.read(cohort+'-rows.json'))}
+              assert len(ins)==356 and set(ins)==set(before)
+              rows=[]
+              for n,raw in ins.items():
+                  r=before[n];h=hashlib.sha256(raw).hexdigest();assert h==r['sha256'],n
+                  code,err=run(raw); row={'name':n,'sha256':h,'format':r['format'],'expected':r['expected'],'before':r['exit'],'exit':code,'stderr':err}
+                  rows.append(row)
+              changes=[r for r in rows if r['before']!=r['exit']]
+              summary={'cohort':cohort,'counts':dict(collections.Counter(r['exit'] for r in rows)),'changed':changes,'input_count':len(rows)}
+              (p/(cohort+'-rows.json')).write_text(json.dumps(rows,indent=2)+'\n')
+              (p/(cohort+'-summary.json')).write_text(json.dumps(summary,indent=2)+'\n')
+              print('SUMMARY '+json.dumps(summary),flush=True)
+          external=[]
+          for r in json.loads(base.read('new-regressions.json')):
+              raw=base.read('new-inputs/'+r['case']);assert hashlib.sha256(raw).hexdigest()==r['sha256']
+              code,err=run(raw);external.append({'name':r['case'],'before':r['exit'],'exit':code,'stderr':err})
+          (p/'external.json').write_text(json.dumps(external,indent=2)+'\n')
+          PY
+      - name: Enforce genuine computation gains and zero regressions
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('evidence-run')
+          n=json.loads((p/'native-ab.json').read_text());assert len(n)==7
+          assert all(r['after']==0 for r in n if r['expected']==0),n
+          assert all(r['before']==2 for r in n if r['name'] in ('boolGood','fieldGood','surplusGood')),n
+          assert all(r['after'] in (1,2) for r in n if r['expected']==1),n
+          c=json.loads((p/'iota-controls.json').read_text())
+          assert len(c)==5 and all(r['exit'] in (1,2) for r in c),c
+          for cohort in ('current','prior'):
+              r=json.loads((p/(cohort+'-summary.json')).read_text());assert r['input_count']==356
+              assert all(c['format']=='3.2.0' and c['before']==2 and c['expected']=='accept' and c['exit']==0 for c in r['changed']),r
+          e=json.loads((p/'external.json').read_text());assert len(e)==4 and all(r['before']==r['exit'] for r in e),e
+          print('QUALIFIED_NATIVE_IOTA '+json.dumps({'new_witnesses':[(r['name'],r['before'],r['after']) for r in n],'negative_controls':[(r['name'],r['exit']) for r in c]}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-certified-iota
+          path: evidence-run/
+          retention-days: 60
