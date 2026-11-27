@@ -52,6 +52,7 @@ jobs:
                '        reduction:Some((name(r)?,reduction)),projection:None})'),
               ('signature(rec,OpaqueInductiveKind::Recursor)?],reduction:Some((name(r)?,RecursorReduction{',
                'signature(rec,OpaqueInductiveKind::Recursor)?],projection:None,reduction:Some((name(r)?,RecursorReduction{'),
+              ('need(self.0.insert(f.name,f.ty).is_none())?;', 'need(self.0.insert(f.name,f.ty.clone()).is_none())?;'),
               ('        Some(CertifiedFamily{signatures:out,reduction})',
                '''        // The reconstructed family (not its exported flags alone) owns
                   // the constructor telescope. Keep eta disabled in this ablation.
