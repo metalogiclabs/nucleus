@@ -300,10 +300,78 @@ pub(super) struct CertifiedFamily {
 }
 #[derive(Default)]
 pub(super) struct PriorFamilies(HashMap<usize,T>);
+// Exact indexed identity family: (A : Sort u) (a : A) (b : A)
+// -> Prop; sole constructor returns identity at (a,a). Derive
+// every binder and recursor rule from that source shape, not a
+// declaration name or a stored K bit. Conservative names/flags
+// constrain the first fragment; they never suffice for admission.
+fn checked_identity(t:&Tables,b:&Value)->Option<CertifiedFamily>{
+    use crate::id::{ExprId,NameId};
+    use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
+    let mut fuel=Budget(100_000);
+    need(keys(b,&["types","ctors","recs"]))?;
+    let [ind]=arr(b,"types")? else{return None};
+    let [ctor]=arr(b,"ctors")? else{return None};
+    let [rec]=arr(b,"recs")? else{return None};
+    need(keys(ind,&["all","ctors","hasEta","hasLargeElim","hasProjections","isImpredicative",
+        "isK","isRec","isUnsafe","levelParams","name","numIndices","numNested","numParams","type"]))?;
+    need(keys(ctor,&["cidx","induct","isUnsafe","levelParams","name","numFields","numParams","type"]))?;
+    need(keys(rec,&["all","isUnsafe","k","levelParams","name","numIndices","numMinors",
+        "numMotives","numParams","rules","type"]))?;
+    let i=num(ind,"name")?;let c=num(ctor,"name")?;let r=num(rec,"name")?;
+    need(t.valid_name(i)&&t.valid_name(c)&&t.valid_name(r)&&
+        HashSet::from([i,c,r]).len()==3&&t.name(c,i,"refl")&&t.name(r,i,"rec"))?;
+    let ps=numbers(ind,"levelParams")?;
+    let [u]=ps.as_slice() else{return None};
+    need(t.valid_name(*u)&&numbers(ind,"all")?==[i]&&numbers(ind,"ctors")?==[c])?;
+    need(num(ind,"numParams")?==2&&num(ind,"numIndices")?==1&&num(ind,"numNested")?==0&&
+        !boolean(ind,"isRec")?&&!boolean(ind,"isUnsafe")?)?;
+    let f=Features::read(ind).ok()?;
+    need(!f.imp&&f.large&&f.k&&!f.eta&&!f.projections)?;
+    need(num(ctor,"cidx")?==0&&num(ctor,"induct")?==i&&
+        num(ctor,"numParams")?==2&&num(ctor,"numFields")?==0&&
+        !boolean(ctor,"isUnsafe")?&&numbers(ctor,"levelParams")?==ps)?;
+    need(numbers(rec,"all")?==[i]&&!boolean(rec,"isUnsafe")?&&boolean(rec,"k")?&&
+        num(rec,"numParams")?==2&&num(rec,"numIndices")?==1&&
+        num(rec,"numMotives")?==1&&num(rec,"numMinors")?==1)?;
+    let rps=numbers(rec,"levelParams")?;
+    let [v,ru]=rps.as_slice() else{return None};
+    need(*ru==*u&&*v!=*u&&t.valid_name(*v)&&fresh_motive(t,&ps,*v))?;
+    let levels=[param(*u)];
+    let eq=|a:usize,x:usize,y:usize|apps(constant(i,&levels),[var(a),var(x),var(y)]);
+    let refl=|a:usize,x:usize|apps(constant(c,&levels),[var(a),var(x)]);
+    let alpha=sort(param(*u));
+    let ty=wrap(&[alpha.clone(),var(0),var(1)],sort(zero()),false);
+    let ctor_ty=wrap(&[alpha.clone(),var(0)],eq(1,0,0),false);
+    let motive=pi(var(1),pi(eq(2,1,0),sort(param(*v))));
+    let minor=apps(var(0),[var(1),refl(2,1)]);
+    let common=[alpha,var(0),motive,minor];
+    let rec_ty=wrap(&common,pi(var(3),pi(eq(4,3,0),apps(var(3),[var(1),var(0)]))),false);
+    let rhs=wrap(&common,var(0),true);
+    need(from_expr(t,num(ind,"type")?,&mut fuel,0)?==ty)?;
+    need(from_expr(t,num(ctor,"type")?,&mut fuel,0)?==ctor_ty)?;
+    need(from_expr(t,num(rec,"type")?,&mut fuel,0)?==rec_ty)?;
+    let [rule]=arr(rec,"rules")? else{return None};
+    need(keys(rule,&["ctor","nfields","rhs"])&&num(rule,"ctor")?==c&&num(rule,"nfields")?==0)?;
+    need(from_expr(t,num(rule,"rhs")?,&mut fuel,0)?==rhs)?;
+    let signature=|row:&Value,kind|->Option<DerivedSignature>{
+        Some(DerivedSignature{kind,name:NameId(u64::try_from(num(row,"name")?).ok()?),
+            level_params:numbers(row,"levelParams")?.into_iter().map(|n|u64::try_from(n).ok().map(NameId)).collect::<Option<Vec<_>>>()?,
+            ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
+    };
+    // Do not install a reduction certificate. This experiment
+    // tests only the checked opaque indexed signatures.
+    Some(CertifiedFamily{signatures:vec![
+        signature(ind,OpaqueInductiveKind::Type)?,
+        signature(ctor,OpaqueInductiveKind::Constructor)?,
+        signature(rec,OpaqueInductiveKind::Recursor)?],reduction:None})
+}
+
 impl PriorFamilies {
     pub(super) fn certify(&mut self,t:&Tables,b:&Value)->Option<CertifiedFamily> {
         use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
         use crate::id::{ExprId,NameId};
+        if let Some(identity)=checked_identity(t,b){return Some(identity);}
         let f=checked_family_with_prior(t,b,&self.0)?;
         let signature=|row:&Value,kind|->Option<DerivedSignature>{
             Some(DerivedSignature{kind,name:NameId(u64::try_from(num(row,"name")?).ok()?),

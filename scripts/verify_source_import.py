@@ -42,6 +42,21 @@ def main():
                 or {k for k in manifest["runtime_files"] if manifest["runtime_files"][k] != previous["runtime_files"].get(k)} != changed):
             print("Invalid computation qualification lineage", file=sys.stderr)
             return 1
+    identity_path = root / "evidence/native32-identity-qualification-20261127.json"
+    if identity_path.exists():
+        previous = manifest
+        if not computation_path.exists():
+            print("Missing parent computation qualification", file=sys.stderr)
+            return 1
+        manifest = json.loads(identity_path.read_text())
+        changed = {"src/renovation/nullary/parametric.rs"}
+        if (manifest.get("status") != "WARRANTED_BOUNDED"
+                or manifest.get("parent_manifest_sha256") != hashlib.sha256(computation_path.read_bytes()).hexdigest()
+                or set(manifest["runtime_files"]) != set(previous["runtime_files"])
+                or set(manifest["changed_runtime_files"]) != changed
+                or {k for k in manifest["runtime_files"] if manifest["runtime_files"][k] != previous["runtime_files"][k]} != changed):
+            print("Invalid indexed identity qualification lineage", file=sys.stderr)
+            return 1
     expected = manifest["runtime_files"]
     actual = {p.relative_to(root).as_posix() for p in (root / "src").rglob("*") if p.is_file()}
     actual.update(("Cargo.toml", "Cargo.lock", "arena.py", "arena-flags.json"))
