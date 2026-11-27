@@ -1,0 +1,198 @@
+name: Publish exact qualified Nucleus ordinary-core source for review
+on:
+  push:
+    branches: [research/native32-ordinary-completion-20261127]
+    paths: ['.github/workflows/publish-native32-qualified.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cfbafd7531ce8e3d2e439e745c149d1b63ce8999
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Restore only the source qualified by the exact completed run
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = cfbafd7531ce8e3d2e439e745c149d1b63ce8999
+          test "$(git ls-remote --heads origin refs/heads/main | cut -f1)" = cfbafd7531ce8e3d2e439e745c149d1b63ce8999
+          test -z "$(git ls-remote --heads origin refs/heads/research/native32-ordinary-qualified-20261127)"
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15172160773/zip > "$RUNNER_TEMP/qualified.zip"
+          printf '%s  %s\n' 7dc78b7df4af5d35db050b9c438bb06aa359d1e326c02c73104d212668286180 "$RUNNER_TEMP/qualified.zip" | sha256sum -c -
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,tarfile,zipfile
+          root=pathlib.Path('.')
+          z=zipfile.ZipFile(pathlib.Path(os.environ['RUNNER_TEMP'])/'qualified.zip')
+          assert z.testzip() is None
+          assert z.read('commit.txt').decode().strip()=='c1f596b23eba1edabcc06ac32773d71a17619d7e'
+          assert z.read('candidate-tree.txt').decode().strip()=='7844e7be800168c004edbab7fbba0b42db8e4524'
+          summary=json.loads(z.read('corpus-summary.json'))
+          assert summary['counts']=={'0':62,'1':51,'2':243} and summary['input_count']==356
+          assert len(summary['changed'])==41
+          assert all(r['official_previous_exit']==2 and r['exit']=={'accept':0,'reject':1}[r['expected']] for r in summary['changed'])
+          restoration=json.loads(z.read('migration-restoration.json'))
+          assert len(restoration['restored'])==38 and not restoration['remaining']
+          prior=json.loads(z.read('prior-rows.json'))
+          assert len(prior)==356 and collections.Counter(r['new'] for r in prior)=={0:62,1:51,2:243}
+          assert all(r['old']==r['new'] or (r['format']=='3.2.0' and r['old']==2 and r['new']=={'accept':0,'reject':1}[r['expected']]) for r in prior)
+          assert [r['exit'] for r in json.loads(z.read('new-regressions.json'))]==[2,2,1,2]
+          assert len(json.loads(z.read('boundary-controls.json')))==9
+          original=root/'evidence/source-import-20261126.json'
+          base=json.loads(original.read_text())
+          pins={
+            'src/renovation/nullary.rs':('352e95a2041819fe6d36c300642d002d61c06f19','bcc8645b0cdb958f2a2d0c51e529829dc0a8610d16a6fd0b3f61d9bc3afb698c'),
+            'src/renovation/nullary/parametric.rs':('5fbb41152af9a9f87b7e14c60b01af96e5d188eb','f3aac89b7c48d46e37cbff96c3bdabbf2f6b4da97f75cc72b3ec9335733f896a'),
+            'src/parser.rs':('ec0664842fa056ab87a7bc08a6b513a854fb4968','f2ed7bb33224fc536282d6e83e5d6fbdbc62713c23a1da9a7a66fa11ad9d0335'),
+            'src/renovation.rs':('63d68ba056fb195085f530d6a8d6bdad5848c437','a94647e71e77e0cd381470bf8656951634a1200860fc40cb097414423a4f4610'),
+            'src/lib.rs':('c4c665849c1acde79fcb0c92e4762c29536270ed','bfdcc671a13ea04c978ab7f4e7dfd8a5635ccda61880580d667b0357772127f6')}
+          def identity(b):
+              return {'git_blob':hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest(),'sha256':hashlib.sha256(b).hexdigest()}
+          tar=tarfile.open(fileobj=io.BytesIO(z.read('candidate-source.tar.gz')))
+          expected={k for k in base['runtime_files'] if k.startswith('src/')}
+          actual={m.name for m in tar.getmembers() if m.isfile()}
+          assert actual==expected and len(actual)==24
+          assert all(m.isdir() or m.isfile() for m in tar.getmembers())
+          qualified={}
+          for m in tar.getmembers():
+              if not m.isfile(): continue
+              b=tar.extractfile(m).read(); ids=identity(b)
+              if m.name in pins:
+                  assert (ids['git_blob'],ids['sha256'])==pins[m.name],m.name
+                  (root/m.name).write_bytes(b)
+              else: assert ids==base['runtime_files'][m.name],m.name
+              qualified[m.name]=ids
+          runtime={k:identity((root/k).read_bytes()) for k in base['runtime_files']}
+          assert set(k for k in runtime if runtime[k]!=base['runtime_files'][k])==set(pins)
+          manifest={'status':'WARRANTED_BOUNDED','original_commit':base['original_commit'],
+                    'original_src_tree':base['original_src_tree'],'base_manifest_sha256':hashlib.sha256(original.read_bytes()).hexdigest(),
+                    'source_base_commit':'cfbafd7531ce8e3d2e439e745c149d1b63ce8999',
+                    'qualification_run':'https://github.com/metalogiclabs/nucleus/actions/runs/45938613850',
+                    'qualification_artifact_id':15172160773,
+                    'qualification_artifact_sha256':'7dc78b7df4af5d35db050b9c438bb06aa359d1e326c02c73104d212668286180',
+                    'qualification_harness':'c1f596b23eba1edabcc06ac32773d71a17619d7e',
+                    'qualified_candidate_tree':'7844e7be800168c004edbab7fbba0b42db8e4524',
+                    'qualification_binary_sha256':'17b2f10940b78e2e2378a37c054185d48441c174911567d4168447ad1f067fd2',
+                    'changed_runtime_files':sorted(pins),'runtime_files':runtime,
+                    'current_corpus':summary['counts'],'prior_corpus':{'0':62,'1':51,'2':243},
+                    'restored_migration_decisions':38,'new_correct_decisions':3,
+                    'external_fixture_raw_exits':[2,2,1,2]}
+          (root/'evidence/native32-ordinary-qualification-20261127.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          # Do not replace the historical import manifest. Check the exact
+          # current manifest and its lineage as a distinct qualified revision.
+          f=root/'scripts/verify_source_import.py'
+          s=f.read_text()
+          old='    manifest = json.loads((root / "evidence/source-import-20261126.json").read_text())'
+          new='''    original_path = root / "evidence/source-import-20261126.json"
+              original = json.loads(original_path.read_text())
+              qualified_path = root / "evidence/native32-ordinary-qualification-20261127.json"
+              manifest = original
+              if qualified_path.exists():
+                  manifest = json.loads(qualified_path.read_text())
+                  if (manifest.get("status") != "WARRANTED_BOUNDED"
+                          or manifest.get("base_manifest_sha256") != hashlib.sha256(original_path.read_bytes()).hexdigest()
+                          or set(manifest["runtime_files"]) != set(original["runtime_files"])):
+                      print("Invalid qualified runtime lineage", file=sys.stderr)
+                      return 1
+                  changed = sorted(k for k in manifest["runtime_files"]
+                                   if manifest["runtime_files"][k] != original["runtime_files"][k])
+                  if changed != manifest["changed_runtime_files"]:
+                      print("Qualified runtime delta differs from manifest", file=sys.stderr)
+                      return 1'''
+          import textwrap
+          new=new.split('\n')[0]+'\n'+textwrap.dedent('\n'.join(new.split('\n')[1:]))
+          # The generated block must stay within main().
+          new='\n'.join([new.splitlines()[0]]+['    '+line for line in new.splitlines()[1:]])
+          assert s.count(old)==1
+          s=s.replace(old,new).replace('print(f"Verified {len(expected)} runtime files against {manifest[\'original_commit\']}")','print(f"Verified {len(expected)} runtime files against {manifest.get(\'qualification_run\', manifest[\'original_commit\'])}")')
+          f.write_text(s)
+          q=root/'docs/QUALIFICATION.md'
+          q.write_text(q.read_text()+"""
+          
+          ## Native NDJSON 3.2.0 ordinary-core migration (2026-11-27)
+          
+          [Qualified run 45938613850](https://github.com/metalogiclabs/nucleus/actions/runs/45938613850)
+          and [retained artifact 15172160773](https://github.com/metalogiclabs/nucleus/actions/runs/45938613850/artifacts/15172160773)
+          establish the exact runtime file hashes in
+          [the separate qualification manifest](../evidence/native32-ordinary-qualification-20261127.json).
+          The original import manifest remains historical evidence.
+          
+          Two separate 356-input replays (current native-export cohort and earlier
+          preview cohort) each yielded 62 ACCEPT, 51 REJECT, and 243 UNKNOWN, with
+          no incorrect decisive results. All 38 decisions lost in the exporter
+          migration were recovered; three additional universe cases were accepted.
+          The core accepts only strictly validated safe ordinary definitions,
+          opaque theorems and dependent-form lets. An ill-formed final axiom may
+          be rejected; a valid axiom does not authorize acceptance. No new
+          inductive, projection, quotient or literal authority is introduced.
+          
+          Four independently sourced regressions yielded UNKNOWN, UNKNOWN,
+          REJECT, UNKNOWN respectively (valid and invalid casesOn, invalid
+          Nat.log2, missing Nat.succ). The invalid casesOn transport error was
+          eliminated, but its semantic rejection and broader recursive checking
+          remain unresolved. These are bounded local qualification results, not
+          a new official Arena ranking or a whole-Mathlib result.
+          """)
+          # Keep these small locally authored tests permanent, independent of
+          # the lifetime of the larger exact official export artifact.
+          (root/'tests/native32_ordinary.rs').write_text(r'''use std::io::Cursor;
+          use metatron_kernel::{run, verdict::Verdict};
+          
+          const HEADER: &str = "{\"meta\":{\"exporter\":{\"name\":\"lean4export\",\"version\":\"3.2.0\"},\"format\":{\"version\":\"3.2.0\"},\"lean\":{\"githash\":\"synthetic-control\",\"version\":\"control\"}}}\n";
+          const TABLES: &str = "{\"in\":1,\"str\":{\"pre\":0,\"str\":\"a\"}}\n{\"il\":1,\"succ\":0}\n{\"ie\":0,\"sort\":1}\n{\"ie\":1,\"sort\":0}\n";
+          const GOOD: &str = "{\"def\":{\"all\":[1],\"hints\":\"opaque\",\"levelParams\":[],\"name\":1,\"safety\":\"safe\",\"type\":0,\"value\":1}}\n";
+          fn replay(body:&str)->Verdict {
+              run(Cursor::new(format!("{HEADER}{body}").into_bytes()))
+          }
+          #[test]
+          fn native_definitions_check_actual_types() {
+              assert_eq!(replay(&format!("{TABLES}{GOOD}")),Verdict::Accept);
+              let bad=GOOD.replace("\"type\":0,\"value\":1","\"type\":1,\"value\":0");
+              assert_eq!(replay(&format!("{TABLES}{bad}")),Verdict::Reject);
+          }
+          #[test]
+          fn valid_axiom_does_not_authorize_acceptance() {
+              let tail="{\"in\":2,\"str\":{\"pre\":0,\"str\":\"b\"}}\n{\"axiom\":{\"isUnsafe\":false,\"levelParams\":[],\"name\":2,\"type\":0}}\n";
+              assert_eq!(replay(&format!("{TABLES}{GOOD}{tail}")),Verdict::Unknown);
+          }
+          #[test]
+          fn native_unsafe_and_unsupported_decline() {
+              let bad=GOOD.replace("\"safe\"","\"unsafe\"");
+              assert_eq!(replay(&format!("{TABLES}{bad}")),Verdict::Unknown);
+              let duplicate="{\"ie\":1,\"sort\":0}\n";
+              assert_eq!(replay(&format!("{TABLES}{duplicate}{GOOD}")),Verdict::Error);
+          }
+          #[test]
+          fn native_let_is_checked() {
+              let body="{\"in\":2,\"str\":{\"pre\":0,\"str\":\"x\"}}\n{\"ie\":2,\"bvar\":0}\n{\"ie\":3,\"letE\":{\"body\":2,\"name\":2,\"nondep\":false,\"type\":0,\"value\":1}}\n";
+              let d=GOOD.replace("\"value\":1","\"value\":3");
+              assert_eq!(replay(&format!("{TABLES}{body}{d}")),Verdict::Accept);
+          }
+          ''')
+          PY
+          python3 -m py_compile scripts/verify_source_import.py
+          python3 scripts/verify_source_import.py
+          git diff --stat
+      - name: Verify permanent regressions before publishing review branch
+        run: |
+          set -euo pipefail
+          cargo test --locked --test native32_ordinary
+          python3 -m unittest discover -s tests_py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b research/native32-ordinary-qualified-20261127
+          git add src scripts/verify_source_import.py evidence/native32-ordinary-qualification-20261127.json docs/QUALIFICATION.md tests/native32_ordinary.rs
+          git diff --cached --name-only
+          git commit -m "Qualify native 3.2 ordinary declarations and expression identity order"
+          git push origin HEAD:refs/heads/research/native32-ordinary-qualified-20261127
+          git rev-parse HEAD
