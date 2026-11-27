@@ -98,7 +98,7 @@ jobs:
           # checked source file and exact set of source deltas.
           f=root/'scripts/verify_source_import.py'
           s=f.read_text();marker='    expected = manifest["runtime_files"]'
-          addition='''    computation_path = root / "evidence/native32-computation-qualification-20261127.json"
+          addition='''computation_path = root / "evidence/native32-computation-qualification-20261127.json"
           if computation_path.exists():
               previous = manifest
               if not qualified_path.exists():
@@ -118,7 +118,8 @@ jobs:
                   return 1
           '''
           assert s.count(marker)==1
-          f.write_text(s.replace(marker,addition+marker))
+          import textwrap
+          f.write_text(s.replace(marker,textwrap.indent(addition,'    ')+marker))
           fixtures=root/'tests/fixtures/native32-iota';fixtures.mkdir()
           for r in native:
               raw=z.read('native/'+r['name']+'.ndjson')
