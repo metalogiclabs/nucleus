@@ -1,0 +1,301 @@
+name: Native 3.2 complete quotient certificate on exact PR 6
+on:
+  push:
+    branches: [test/native32-quotient-certificate-12ce8435]
+    paths: ['.github/workflows/native32-quotient-certificate.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Freeze exact parent and corpus
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          P=c34ceab8bfa6c233bd272b95a280954aa32fad61
+          git merge-base --is-ancestor "$P" HEAD
+          git diff --exit-code "$P" HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          test "$(git rev-parse HEAD:src)" = 2a3a066c4232b1edf733585e68f1c09221651324
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15230979584/zip > evidence-run/census.zip
+          printf '%s  %s\n' 9820e6486f696845c1c0ea6f5d1829a512b55d5f927235b63ef9b56d41c7175f evidence-run/census.zip | sha256sum -c -
+          cargo build --locked --release --features diagnostics > evidence-run/baseline-build.log 2>&1
+          cp target/release/metatron-kernel evidence-run/baseline
+      - name: Reconstruct all four quotient signatures with explicit renovated universe boundary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def patch(path,pairs):
+              p=Path(path); s=p.read_text()
+              for a,b in pairs:
+                  assert s.count(a)==1,(path,a,s.count(a))
+                  s=s.replace(a,b)
+              p.write_text(s)
+          patch('src/parser.rs',[
+              ('''pub(crate) fn parse_ordinary_native(
+              meta_value: Value, rows: &[Value],
+          ) -> Result<ParsedExport, ParseError> {
+              let mut export = ParsedExport {''',
+               '''pub(crate) fn parse_ordinary_native(
+              meta_value: Value, rows: &[Value],
+          ) -> Result<ParsedExport, ParseError> {
+              parse_native_rows(meta_value, rows, false)
+          }
+
+          // Quot records are permitted only by the separate complete
+          // compositional certificate; the ordinary route is unchanged.
+          pub(crate) fn parse_composite_native(
+              meta_value: Value, rows: &[Value],
+          ) -> Result<ParsedExport, ParseError> {
+              parse_native_rows(meta_value, rows, true)
+          }
+
+          fn parse_native_rows(
+              meta_value: Value, rows: &[Value], allow_quot: bool,
+          ) -> Result<ParsedExport, ParseError> {
+              let mut export = ParsedExport {'''),
+              ('''            && value.get("thm").is_none() && value.get("axiom").is_none() {''',
+               '''            && value.get("thm").is_none() && value.get("axiom").is_none()
+                      && !(allow_quot && value.get("quot").is_some()) {'''),
+              ('''        && !(i+1==export.declarations.len() && matches!(d, Declaration::Axiom { .. }))) {''',
+               '''        && !(allow_quot && matches!(d, Declaration::Quot { .. }))
+                  && !(i+1==export.declarations.len() && matches!(d, Declaration::Axiom { .. }))) {'''),
+          ])
+          patch('src/checker.rs',[
+              ('''                    kind,
+                              limits,
+                              delta_policy,
+                          ) {''',
+               '''                    kind,
+                              limits,
+                              delta_policy,
+                              false,
+                          ) {'''),
+              ('''fn is_quot_type(export: &ResolvedExport, expression: ExprId, level: NameId) -> bool {''',
+               '''fn is_quot_type(export: &ResolvedExport, expression: ExprId, level: NameId, renovated: bool) -> bool {'''),
+              ('''        && is_sort_parameter(export, result, level)
+          }
+
+          fn is_quot_mk_type(''',
+               '''        && if renovated {
+                      // Independently recognize precisely max(1,u), not just a
+                      // nonzero sampled sort or a claimed exporter version.
+                      let Some(Expr::Sort(l)) = export.exprs.get(result) else { return false; };
+                      let Some(Level::Max(a,b)) = export.levels.get(*l) else { return false; };
+                      let one = |l| matches!(export.levels.get(l), Some(Level::Succ(z))
+                          if matches!(export.levels.get(*z), Some(Level::Zero)));
+                      let param = |l| matches!(export.levels.get(l), Some(Level::Param(p)) if *p == level);
+                      (one(*a) && param(*b)) || (one(*b) && param(*a))
+                  } else { is_sort_parameter(export, result, level) }
+          }
+
+          fn is_quot_mk_type('''),
+              ('''fn check_quot_declaration(''', '''pub(crate) fn check_quot_declaration('''),
+              ('''    kind: QuotKind,
+              limits: Limits,
+              delta_policy: DeltaPolicy,
+          ) -> Result<Environment, Verdict> {
+              let exact = match kind {''',
+               '''    kind: QuotKind,
+              limits: Limits,
+              delta_policy: DeltaPolicy,
+              renovated: bool,
+          ) -> Result<Environment, Verdict> {
+              let exact = match kind {'''),
+              ('''&& is_quot_type(export, ty, *level))''','''&& is_quot_type(export, ty, *level, renovated))'''),
+          ])
+          patch('src/renovation/nullary/parametric.rs',[
+              ('fn checked_identity(t:&Tables,b:&Value)->Option<CertifiedFamily>{',
+               'pub(super) fn checked_identity(t:&Tables,b:&Value)->Option<CertifiedFamily>{'),
+          ])
+          patch('src/renovation/nullary/composite.rs',[
+              ('use crate::syntax::Declaration;', 'use crate::syntax::{Declaration,QuotKind};'),
+              ('enum Stage { Family(parametric::CertifiedFamily), Ordinary(usize) }',
+               'enum Stage { Family(parametric::CertifiedFamily), Ordinary(usize), Quotient(usize) }'),
+              ('    let mut families=0usize;',
+               '''    let mut families=0usize;
+              let mut quotient_count=0usize;
+              let mut eq_certified=false;
+              let renovated=meta.pointer("/meta/lean/githash").and_then(Value::as_str)
+                  ==Some("a8ad4dbebef375bdba9a6233afdb8ad52dbb16cd");'''),
+              ('''            let cert=prior.certify(&tables,row.get("inductive")?)?;''',
+               '''            need(quotient_count==0 || quotient_count==4)?;
+                      let block=row.get("inductive")?;
+                      let cert=prior.certify(&tables,block)?;
+                      if let [ty]=arr(block,"types")? {
+                          if tables.name(num(ty,"name")?,0,"Eq") {
+                              // Quot.lift's equality dependency must be the
+                              // independently reconstructed identity family.
+                              eq_certified=parametric::checked_identity(&tables,block).is_some();
+                          }
+                      }'''),
+              ('''        let (item,is_def)=if keys(row,&["def"]){(row.get("def")?,true)}''',
+               '''        if keys(row,&["quot"]){
+                      need(renovated && eq_certified && quotient_count<4)?;
+                      let q=row.get("quot")?;
+                      need(keys(q,&["kind","name","levelParams","type"]))?;
+                      let roles=["type","ctor","lift","ind"];
+                      need(q.get("kind")?.as_str()?==roles[quotient_count])?;
+                      let n=num(q,"name")?;
+                      need(tables.valid_name(n)&&names.insert(NameId(u64::try_from(n).ok()?)))?;
+                      let ps=numbers(q,"levelParams")?;
+                      let mut unique=HashSet::new();
+                      need(ps.iter().all(|&p|tables.valid_name(p)&&unique.insert(p)))?;
+                      need(num(q,"type")?<tables.exprs.len())?;
+                      stages.push(Stage::Quotient(count));
+                      count+=1;
+                      quotient_count+=1;
+                      ordinary_rows.push(row.clone());
+                      continue;
+                  }
+                  let (item,is_def)=if keys(row,&["def"]){(row.get("def")?,true)}'''),
+              ('        if is_def {','        need(quotient_count==0 || quotient_count==4)?;\n        if is_def {'),
+              ('    need(families>0&&count>0)?;',
+               '    need(families>0&&count>quotient_count&&(quotient_count==0||quotient_count==4))?;'),
+              ('crate::parser::parse_ordinary_native(meta,&ordinary_rows)',
+               'crate::parser::parse_composite_native(meta,&ordinary_rows)'),
+              ('''            Stage::Ordinary(i)=>{''',
+               '''            Stage::Quotient(i)=>{
+                          let Declaration::Quot{name,level_params,ty,kind}=export.declarations.get(i)? else{return None};
+                          env=crate::checker::check_quot_declaration(&export,&env,*name,level_params,*ty,*kind,limits,policy,true).ok()?;
+                          if *kind==QuotKind::Ind { need(env.quot_primitives().is_some())?; }
+                      },
+                      Stage::Ordinary(i)=>{'''),
+          ])
+          PY
+          git diff --check
+          git diff --exit-code -- . ':!src/parser.rs' ':!src/checker.rs' ':!src/renovation/nullary/parametric.rs' ':!src/renovation/nullary/composite.rs' ':!evidence-run'
+          git diff -- src > evidence-run/candidate.patch
+          git add src/parser.rs src/checker.rs src/renovation/nullary/parametric.rs src/renovation/nullary/composite.rs
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          cargo build --locked --release --features diagnostics > evidence-run/candidate-build.log 2>&1 || { cat evidence-run/candidate-build.log; exit 1; }
+          cp target/release/metatron-kernel evidence-run/candidate
+          sha256sum evidence-run/baseline evidence-run/candidate arena.py arena-flags.json > evidence-run/binaries.sha256
+          python3 scripts/test.py > evidence-run/rust-tests.log 2>&1
+          python3 -m unittest discover -s tests_py > evidence-run/python-tests.log 2>&1
+      - name: Install exact renovated reference kernel
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4-pr-releases:pr-release-16595-a8ad4db
+          "$HOME/.elan/bin/elan" run leanprover/lean4-pr-releases:pr-release-16595-a8ad4db lean --version > evidence-run/oracle-version.txt
+          grep -q a8ad4db evidence-run/oracle-version.txt
+      - name: Replay exact quotient fixtures, adversarial controls and all three pinned cohorts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,subprocess,tarfile,zipfile
+          O=pathlib.Path('evidence-run')
+          def digest(raw):return hashlib.sha256(raw).hexdigest()
+          def archive(raw):
+              z=zipfile.ZipFile(io.BytesIO(raw));assert z.testzip() is None;return z
+          def inputs(raw):
+              z=archive(raw)
+              with tarfile.open(fileobj=io.BytesIO(z.read('lean-arena-tests.tar.gz'))) as t:
+                  return {m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          def save(name,val):(O/name).write_text(json.dumps(val,indent=2,sort_keys=True)+'\n')
+          env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))}
+          env.update(json.loads(pathlib.Path('arena-flags.json').read_text()))
+          def run(raw,baseline=False):
+              if len(raw)>10*1024*1024:return 2,'input byte allowance'
+              cmd=[str((O/('baseline' if baseline else 'candidate')).resolve())]
+              p=subprocess.run(cmd,input=raw,capture_output=True,env=env,timeout=120)
+              return p.returncode,p.stderr.decode(errors='replace')
+          z=archive((O/'census.zip').read_bytes())
+          q=archive(z.read('qualified.zip'))
+          pk=archive(q.read('base.zip'));k=archive(pk.read('base.zip'));identity=archive(k.read('base.zip'))
+          iota=archive(identity.read('base.zip'));composition=archive(iota.read('composition.zip'));ordinary=archive(composition.read('base.zip'));old=archive(ordinary.read('prior-qualification.zip'))
+          cohorts={
+            'preview':(inputs(z.read('corpus.zip')),{r['name']:{**r,'exit':r['baseline']} for r in map(json.loads,z.read('rows.jsonl').splitlines())}),
+            'current':(inputs(ordinary.read('test-tarball.zip')),{r['name']:r for r in json.loads(q.read('current-rows.json'))}),
+            'prior':(inputs(old.read('tarball.zip')),{r['name']:r for r in json.loads(q.read('prior-rows.json'))}),
+          }
+          ins,prev=cohorts['preview']
+          names=[name for name in ins if name.startswith(('renovation/','tutorial/')) and 'quot' in name.lower()]
+          assert len(names)==12,names
+          fixtures={name.replace('/','-'):(ins[name],{'accept':0,'reject':1}[prev[name]['expected']],False) for name in names}
+          source=ins['renovation/133_quotOfPropIsType']
+          def mutate(which):
+              rows=[json.loads(l) for l in source.splitlines()]
+              qr=[r for r in rows if 'quot' in r]
+              assert [r['quot']['kind'] for r in qr]==['type','ctor','lift','ind']
+              if which=='old-sort':
+                  ids={r['ie']:r for r in rows if 'ie' in r}
+                  e=ids[qr[0]['quot']['type']]
+                  result=ids[ids[e['forallE']['body']]['forallE']['body']]
+                  u=qr[0]['quot']['levelParams'][0]
+                  result['sort']=next(r['il'] for r in rows if r.get('param')==u)
+              elif which=='forged-lift-signature':
+                  qr[2]['quot']['type']=qr[1]['quot']['type']
+              elif which=='missing-ind':
+                  rows.remove(qr[3])
+              elif which=='missing-lift':
+                  rows.remove(qr[2])
+              elif which=='wrong-role':
+                  qr[2]['quot']['kind']='ctor'
+              elif which=='forged-identity':
+                  first=next(r['inductive'] for r in rows if 'inductive' in r)
+                  first['recs'][0]['rules'][0]['rhs']=first['ctors'][0]['type']
+              elif which=='withdraw-preview-profile':
+                  rows[0]['meta']['lean']['githash']='cb63311203a44983a2326b83fcb16dbbd5c5130a'
+              else:raise AssertionError(which)
+              return ('\n'.join(json.dumps(r,separators=(',',':')) for r in rows)+'\n').encode()
+          for name in ('old-sort','forged-lift-signature','missing-ind','missing-lift','wrong-role','forged-identity','withdraw-preview-profile'):
+              fixtures['mut-'+name]=(mutate(name),None,True)
+          d=O/'controls';d.mkdir();controls=[]
+          for name,(raw,expected,withdrawal) in fixtures.items():
+              p=d/(name+'.ndjson');p.write_bytes(raw)
+              before,_=run(raw,True);after,err=run(raw)
+              official=subprocess.run(['elan','run','leanprover/lean4-pr-releases:pr-release-16595-a8ad4db','leanchecker','--from-export',str(p)],capture_output=True,timeout=120)
+              row={'name':name,'sha256':digest(raw),'expected':expected,'policy_withdrawal':withdrawal,'before':before,'exit':after,'stderr':err,'official':official.returncode,'official_stderr':official.stderr.decode(errors='replace'),'official_stdout':official.stdout.decode(errors='replace')}
+              controls.append(row);save('controls.json',controls);print('CONTROL',json.dumps(row),flush=True)
+              assert after in (0,1,2),row
+              if withdrawal:assert after!=0,row
+              else:
+                  assert (official.returncode==0)==(expected==0),row
+                  assert after in (expected,2) and (before==2 or before==after),row
+          summaries={};violations=[]
+          for cohort,(ins,previous) in cohorts.items():
+              assert len(ins)==356 and set(ins)==set(previous),cohort
+              rows=[]
+              for name,data in ins.items():
+                  row=previous[name];assert digest(data)==row['sha256'],name
+                  before,_=run(data,True);after,err=run(data)
+                  # Only new correct outcomes within the pinned renovated profile.
+                  allowed=(cohort=='preview' and before==2 and after=={'accept':0,'reject':1}.get(row['expected']))
+                  if before!=row['exit'] or (after!=before and not allowed):
+                      violations.append((cohort,name,before,after,row['exit'],row['expected']))
+                  rows.append({'name':name,'sha256':digest(data),'expected':row['expected'],'before':before,'exit':after,'stderr':err})
+              changes=[r for r in rows if r['before']!=r['exit']]
+              summary={'count':len(rows),'counts':dict(collections.Counter(r['exit'] for r in rows)),'changes':changes}
+              save(cohort+'-rows.json',rows);summaries[cohort]=summary
+              print('COHORT',cohort,json.dumps(summary),flush=True)
+          save('summary.json',summaries);save('violations.json',violations)
+          assert not violations,violations
+          assert any(r['before']==2 and r['exit']==0 and r['expected']==0 for r in controls),controls
+          print('QUOTIENT_CERTIFICATE_QUALIFIED_BOUNDED',flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-quotient-certificate
+          path: evidence-run/
+          retention-days: 60
