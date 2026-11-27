@@ -100,3 +100,24 @@ Nat.log2, missing Nat.succ). The invalid casesOn transport error was
 eliminated, but its semantic rejection and broader recursive checking
 remain unresolved. These are bounded local qualification results, not
 a new official Arena ranking or a whole-Mathlib result.
+
+
+## Certified nonrecursive composition and computation (2026-11-27)
+
+[Composition qualification](https://github.com/metalogiclabs/nucleus/actions/runs/45940578030)
+recovered 20 correct ACCEPTs on the current native 356-input cohort,
+and one on the earlier cohort. The [iota qualification](https://github.com/metalogiclabs/nucleus/actions/runs/45943776855)
+preserved every one of these verdicts: current 82A/51R/223U,
+earlier 63A/51R/242U. The cohorts overlap.
+
+Four newly generated native 3.2 exports exercising constructor
+selection, field substitution and surplus arguments changed from
+UNKNOWN to ACCEPT; the official pinned Lean kernel accepted each.
+Three invalid computation witnesses stayed UNKNOWN. Five malformed
+rule controls produced two REJECTs and three UNKNOWNs. Exact source,
+fixtures, A/B and both protected replays are retained in
+[artifact 15173687615](https://github.com/metalogiclabs/nucleus/actions/runs/45943776855/artifacts/15173687615)
+and the [new source manifest](../evidence/native32-computation-qualification-20261127.json).
+These are bounded local results, not an updated official Arena score.
+General indexed equality, recursion, eta, K and full Mathlib remain
+outside the established new capability.

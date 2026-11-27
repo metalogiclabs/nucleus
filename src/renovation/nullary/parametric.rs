@@ -6,6 +6,7 @@
 //! Resource caps are refusal boundaries, never shortcuts to acceptance.
 use super::*;
 use std::rc::Rc;
+use std::collections::HashMap;
 
 const MAX_DEPTH:usize=64;
 const MAX_ARITY:usize=16;
@@ -137,7 +138,13 @@ fn as_sort(t:&T)->Option<U>{if let Term::S(u)=t.as_ref(){Some(u.clone())}else{No
 // All constructor-field and parameter-domain terms must have a type derived
 // from this closed context. Arbitrary constants, lambdas, reduction and
 // recursive hypotheses are not assumed available in this fragment.
+#[cfg(test)]
 fn infer(t:&T,ctx:&mut Vec<T>,fuel:&mut Budget,depth:usize)->Option<T>{
+    infer_with_prior(t,ctx,fuel,depth,&HashMap::new())
+}
+// Only earlier fully reconstructed closed family types may supply
+// constant typing authority.
+fn infer_with_prior(t:&T,ctx:&mut Vec<T>,fuel:&mut Budget,depth:usize,prior:&HashMap<usize,T>)->Option<T>{
     fuel.spend(depth)?;
     match t.as_ref(){
         Term::V(i)=>{
@@ -145,17 +152,18 @@ fn infer(t:&T,ctx:&mut Vec<T>,fuel:&mut Budget,depth:usize)->Option<T>{
             lift(ctx.get(k)?,i+1,0,fuel,depth+1)
         },
         Term::S(u)=>Some(sort(succ(u.clone()))),
+        Term::C(n,us) if us.is_empty()=>prior.get(n).cloned(),
         Term::P(d,b)=>{
-            let x=as_sort(&infer(d,ctx,fuel,depth+1)?)?;
+            let x=as_sort(&infer_with_prior(d,ctx,fuel,depth+1,prior)?)?;
             ctx.push(d.clone());
-            let y=as_sort(&infer(b,ctx,fuel,depth+1)?);
+            let y=as_sort(&infer_with_prior(b,ctx,fuel,depth+1,prior)?);
             ctx.pop();
             Some(sort(Rc::new(Universe::IMax(x,y?))))
         },
         Term::A(f,a)=>{
-            let ft=infer(f,ctx,fuel,depth+1)?;
+            let ft=infer_with_prior(f,ctx,fuel,depth+1,prior)?;
             let Term::P(domain,body)=ft.as_ref()else{return None};
-            need(infer(a,ctx,fuel,depth+1)?==*domain)?;
+            need(infer_with_prior(a,ctx,fuel,depth+1,prior)?==*domain)?;
             subst(body,a,0,fuel,depth+1)
         },
         _=>None,
@@ -192,6 +200,9 @@ struct Family {
 }
 pub(super) fn block(t:&Tables,b:&Value)->Option<()>{checked_family(t,b).map(|_|())}
 fn checked_family(t:&Tables,b:&Value)->Option<Family>{
+    checked_family_with_prior(t,b,&HashMap::new())
+}
+fn checked_family_with_prior(t:&Tables,b:&Value,prior:&HashMap<usize,T>)->Option<Family>{
     let mut fuel=Budget(100_000);
     need(keys(b,&["types","ctors","recs"]))?;
     let types=arr(b,"types")?;let constructors=arr(b,"ctors")?;let recs=arr(b,"recs")?;
@@ -219,7 +230,7 @@ fn checked_family(t:&Tables,b:&Value)->Option<Family>{
     let level=as_sort(&tail)?;
     let mut ctx=Vec::new();
     for d in &params{
-        as_sort(&infer(d,&mut ctx,&mut fuel,0)?)?;
+        as_sort(&infer_with_prior(d,&mut ctx,&mut fuel,0,prior)?)?;
         ctx.push(d.clone());
     }
     let f=Features::read(ind).ok()?;
@@ -240,7 +251,7 @@ fn checked_family(t:&Tables,b:&Value)->Option<Family>{
         need(end==family(i,&us,p,p+fs.len())?)?;
         let mut cx=params.clone();
         for d in &fs{
-            let u=as_sort(&infer(d,&mut cx,&mut fuel,0)?)?;
+            let u=as_sort(&infer_with_prior(d,&mut cx,&mut fuel,0,prior)?)?;
             need(f.imp||leq(&u,&level,&mut fuel,0)?)?;
             cx.push(d.clone());
         }
@@ -278,6 +289,64 @@ fn checked_family(t:&Tables,b:&Value)->Option<Family>{
         need(from_expr(t,num(rule,"rhs")?,&mut fuel,0)?==rhs)?;
     }
     Some(Family{name:i,declared,universes:ps,ty:ind_type,params:p,fields,projections:f.projections})
+}
+
+// Only successful full reconstruction produces opaque signatures and
+// constructor-indexed computation authority. K, small elimination
+// and empty-rule recursors never receive an execution certificate.
+pub(super) struct CertifiedFamily {
+    pub(super) signatures:Vec<crate::inductive::DerivedSignature>,
+    pub(super) reduction:Option<(crate::id::NameId,crate::machine::RecursorReduction)>,
+}
+#[derive(Default)]
+pub(super) struct PriorFamilies(HashMap<usize,T>);
+impl PriorFamilies {
+    pub(super) fn certify(&mut self,t:&Tables,b:&Value)->Option<CertifiedFamily> {
+        use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
+        use crate::id::{ExprId,NameId};
+        let f=checked_family_with_prior(t,b,&self.0)?;
+        let signature=|row:&Value,kind|->Option<DerivedSignature>{
+            Some(DerivedSignature{kind,name:NameId(u64::try_from(num(row,"name")?).ok()?),
+                level_params:numbers(row,"levelParams")?.into_iter().map(|n|u64::try_from(n).ok().map(NameId)).collect::<Option<Vec<_>>>()?,
+                ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
+        };
+        let mut out=Vec::new();
+        for (tag,kind) in [("types",OpaqueInductiveKind::Type),("ctors",OpaqueInductiveKind::Constructor),("recs",OpaqueInductiveKind::Recursor)]{
+            for row in arr(b,tag)? {out.push(signature(row,kind)?);}
+        }
+        if f.params==0 && f.universes.is_empty() {
+            need(self.0.insert(f.name,f.ty).is_none())?;
+        }
+        let ind=arr(b,"types")?.first()?;
+        let rec=arr(b,"recs")?.first()?;
+        let features=Features::read(ind).ok()?;
+        let rules=arr(rec,"rules")?;
+        let reduction=if features.large && !features.k && !rules.is_empty(){
+            use crate::machine::{RecursorReduction,RecursorRule};
+            let name=|i:usize|u64::try_from(i).ok().map(NameId);
+            let params=|row:&Value|numbers(row,"levelParams")?.into_iter().map(name).collect::<Option<Vec<_>>>();
+            let constructors=arr(b,"ctors")?;
+            // Full reconstruction already checked identical ordering,
+            // levels, parameters, field count, and derived RHS.
+            need(constructors.len()==rules.len())?;
+            let mut checked=Vec::new();
+            for (ctor,rule) in constructors.iter().zip(rules){
+                need(num(ctor,"name")?==num(rule,"ctor")?)?;
+                checked.push(RecursorRule{
+                    constructor:name(num(ctor,"name")?)?,
+                    constructor_level_params:params(ctor)?,
+                    num_params:num(ctor,"numParams")?,
+                    num_fields:num(ctor,"numFields")?,
+                    rhs:ExprId(u64::try_from(num(rule,"rhs")?).ok()?),
+                });
+            }
+            Some((name(num(rec,"name")?)?,RecursorReduction{
+                k:false,num_params:num(rec,"numParams")?,num_indices:0,
+                level_params:params(rec)?,rules:checked,
+            }))
+        }else{None};
+        Some(CertifiedFamily{signatures:out,reduction})
+    }
 }
 
 mod projection;
