@@ -1,0 +1,314 @@
+name: Native 3.2 checked unary recursive family
+on:
+  push:
+    branches: [research/native32-unary-recursion-20261127]
+    paths: ['.github/workflows/native32-unary-recursion.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Verify exact published parent and build unchanged baseline
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          git merge-base --is-ancestor 10f3473045f4066f11c4c465bf5bf07c4c56d025 HEAD
+          git diff --exit-code 10f3473045f4066f11c4c465bf5bf07c4c56d025 HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          test "$(git rev-parse HEAD:src)" = 1f0d18bf3ca366d357f76f72290916ee85d0617a
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15185455830/zip > evidence-run/base.zip
+          printf '%s  %s\n' 21016ab278975d5344d1ae47f9c58d2645b4dc2b1027e522ab6e507dbca4a526 evidence-run/base.zip | sha256sum -c -
+          cargo build --locked --release --features diagnostics > evidence-run/baseline-build.log 2>&1
+          cp target/release/metatron-kernel evidence-run/baseline
+          sha256sum evidence-run/baseline > evidence-run/baseline-binary.sha256
+      - name: Reconstruct zero and successor family with exact induction hypothesis
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation/nullary/parametric.rs');s=p.read_text()
+          def once(a,b):
+              global s
+              assert s.count(a)==1,(a,s.count(a))
+              s=s.replace(a,b)
+          candidate=r'''// Closed direct unary recursion at Type, with a nullary base and a
+          // single strictly positive self-field. Reconstruct both minor types
+          // and both exact RHSs, including the recursive call on that field.
+          // The certificate is independent of the names N/Nat/zero/succ.
+          // It does not install literals, name-based arithmetic, or K.
+          fn checked_unary_recursive(t:&Tables,b:&Value)->Option<(usize,T,CertifiedFamily)>{
+              use crate::id::{ExprId,NameId};
+              use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
+              use crate::machine::{RecursorReduction,RecursorRule};
+              let mut fuel=Budget(100_000);
+              need(keys(b,&["types","ctors","recs"]))?;
+              let [ind]=arr(b,"types")? else{return None};
+              let [base,step]=arr(b,"ctors")? else{return None};
+              let [rec]=arr(b,"recs")? else{return None};
+              need(keys(ind,&["all","ctors","hasEta","hasLargeElim","hasProjections","isImpredicative",
+                  "isK","isRec","isUnsafe","levelParams","name","numIndices","numNested","numParams","type"]))?;
+              need(keys(rec,&["all","isUnsafe","k","levelParams","name","numIndices","numMinors",
+                  "numMotives","numParams","rules","type"]))?;
+              let i=num(ind,"name")?;let z=num(base,"name")?;let s=num(step,"name")?;let r=num(rec,"name")?;
+              need([i,z,s,r].iter().all(|&n|t.valid_name(n))&&HashSet::from([i,z,s,r]).len()==4&&t.name(r,i,"rec"))?;
+              need(numbers(ind,"all")?==[i]&&numbers(ind,"ctors")?==[z,s]&&
+                  numbers(ind,"levelParams")?.is_empty()&&num(ind,"numParams")?==0&&
+                  num(ind,"numIndices")?==0&&num(ind,"numNested")?==0&&
+                  boolean(ind,"isRec")?&&!boolean(ind,"isUnsafe")?)?;
+              let f=Features::read(ind).ok()?;
+              need(!f.imp&&f.large&&!f.k&&!f.eta&&!f.projections)?;
+              let ty=sort(succ(zero()));
+              let family=constant(i,&[]);
+              need(from_expr(t,num(ind,"type")?,&mut fuel,0)?==ty)?;
+              for (index,ctor,ct) in [(0,base,family.clone()),(1,step,pi(family.clone(),family.clone()))]{
+                  need(keys(ctor,&["cidx","induct","isUnsafe","levelParams","name","numFields","numParams","type"]))?;
+                  need(num(ctor,"cidx")?==index&&num(ctor,"induct")?==i&&
+                      num(ctor,"numParams")?==0&&num(ctor,"numFields")?==index&&
+                      !boolean(ctor,"isUnsafe")?&&numbers(ctor,"levelParams")?.is_empty())?;
+                  need(from_expr(t,num(ctor,"type")?,&mut fuel,0)?==ct)?;
+              }
+              need(numbers(rec,"all")?==[i]&&!boolean(rec,"isUnsafe")?&&!boolean(rec,"k")?&&
+                  num(rec,"numIndices")?==0&&num(rec,"numParams")?==0&&
+                  num(rec,"numMotives")?==1&&num(rec,"numMinors")?==2)?;
+              let rps=numbers(rec,"levelParams")?;
+              let [u]=rps.as_slice() else{return None};
+              need(t.valid_name(*u)&&fresh_motive(t,&[],*u))?;
+              let levels=[param(*u)];
+              let common=[
+                  pi(family.clone(),sort(levels[0].clone())),
+                  app(var(0),constant(z,&[])),
+                  pi(family.clone(),pi(app(var(2),var(0)),app(var(3),app(constant(s,&[]),var(1))))];
+              let expected=wrap(&common,pi(family.clone(),app(var(3),var(0))),false);
+              need(from_expr(t,num(rec,"type")?,&mut fuel,0)?==expected)?;
+              let [zr,sr]=arr(rec,"rules")? else{return None};
+              let zero_rhs=wrap(&common,var(1),true);
+              // In context [motive, base, step, predecessor], the minor is
+              // v1 and recursive hypothesis is rec v3 v2 v1 v0. It is not
+              // a free additional argument and must not be dropped.
+              let ih=apps(constant(r,&levels),[var(3),var(2),var(1),var(0)]);
+              let step_rhs=wrap(&common,lam(family.clone(),apps(var(1),[var(0),ih])),true);
+              let name=|n:usize|u64::try_from(n).ok().map(NameId);
+              let mut rules=Vec::new();
+              for (ctor,fields,rule,rhs) in [(z,0,zr,zero_rhs),(s,1,sr,step_rhs)]{
+                  need(keys(rule,&["ctor","nfields","rhs"])&&num(rule,"ctor")?==ctor&&num(rule,"nfields")?==fields)?;
+                  need(from_expr(t,num(rule,"rhs")?,&mut fuel,0)?==rhs)?;
+                  rules.push(RecursorRule{constructor:name(ctor)?,constructor_level_params:vec![],
+                      num_params:0,num_fields:fields,rhs:ExprId(u64::try_from(num(rule,"rhs")?).ok()?)});
+              }
+              let signature=|row:&Value,kind|->Option<DerivedSignature>{
+                  Some(DerivedSignature{kind,name:name(num(row,"name")?)?,
+                      level_params:numbers(row,"levelParams")?.into_iter().map(name).collect::<Option<Vec<_>>>()?,
+                      ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
+              };
+              Some((i,ty,CertifiedFamily{signatures:vec![
+                  signature(ind,OpaqueInductiveKind::Type)?,
+                  signature(base,OpaqueInductiveKind::Constructor)?,
+                  signature(step,OpaqueInductiveKind::Constructor)?,
+                  signature(rec,OpaqueInductiveKind::Recursor)?],
+                  reduction:Some((name(r)?,RecursorReduction{k:false,num_params:0,num_indices:0,
+                      level_params:vec![name(*u)?],rules}))}))
+          }
+
+          '''
+          once('impl PriorFamilies {',candidate+'impl PriorFamilies {')
+          once('        if let Some(identity)=checked_identity(t,b){return Some(identity);}',
+               '        if let Some(identity)=checked_identity(t,b){return Some(identity);}\n        if let Some((name,ty,cert))=checked_unary_recursive(t,b){\n            need(self.0.insert(name,ty).is_none())?;\n            return Some(cert);\n        }')
+          p.write_text(s)
+          PY
+          git diff --exit-code -- . ':!src/renovation/nullary/parametric.rs'
+          git diff -- src > evidence-run/candidate.patch
+          git add src
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          python3 scripts/test.py > evidence-run/rust-tests.log 2>&1
+          python3 -m unittest discover -s tests_py > evidence-run/python-tests.log 2>&1
+          cargo build --locked --release --features diagnostics > evidence-run/candidate-build.log 2>&1
+          sha256sum target/release/metatron-kernel arena.py arena-flags.json > evidence-run/binary.sha256
+      - name: Install exact native Lean oracle
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install leanprover/lean4-pr-releases:pr-release-16595-cb63311
+          "$HOME/.elan/bin/elan" run leanprover/lean4-pr-releases:pr-release-16595-cb63311 lean --version > evidence-run/oracle-version.txt
+      - name: Replay authentic recursion witnesses and induction-hypothesis countercontrols
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee evidence-run/qualification.log
+          import collections,copy,hashlib,io,json,os,pathlib,subprocess,tarfile,zipfile
+          p=pathlib.Path('evidence-run')
+          def digest(b):return hashlib.sha256(b).hexdigest()
+          def archive(b):
+              z=zipfile.ZipFile(io.BytesIO(b));assert z.testzip() is None;return z
+          raw=(p/'base.zip').read_bytes()
+          assert digest(raw)=='21016ab278975d5344d1ae47f9c58d2645b4dc2b1027e522ab6e507dbca4a526'
+          z=archive(raw)
+          k=archive(z.read('base.zip'));identity=archive(k.read('base.zip'));iota=archive(identity.read('base.zip'))
+          composition=archive(iota.read('composition.zip'));ordinary=archive(composition.read('base.zip'))
+          prior_archive=archive(ordinary.read('prior-qualification.zip'))
+          def inputs(blob):
+              zz=archive(blob)
+              with tarfile.open(fileobj=io.BytesIO(zz.read('lean-arena-tests.tar.gz'))) as t:
+                  return {m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          cohorts={'current':inputs(ordinary.read('test-tarball.zip')),'prior':inputs(prior_archive.read('tarball.zip'))}
+          current=cohorts['current']
+          expected={r['name']:r for r in json.loads(z.read('current-rows.json'))}
+          assert len(current)==356 and set(current)==set(expected)
+          assert collections.Counter(r['exit'] for r in expected.values())=={0:94,1:51,2:211}
+          flags=json.loads(pathlib.Path('arena-flags.json').read_text())
+          env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))};env.update(flags)
+          def run(data,baseline=False):
+              if len(data)>10*1024*1024:return 2,'input byte allowance'
+              cmd=[str((p/'baseline').resolve())] if baseline else ['python3','arena.py']
+              q=subprocess.run(cmd,input=data,capture_output=True,env=env if baseline else None,timeout=120)
+              return q.returncode,q.stderr.decode(errors='replace')
+          def save(name,rows):(p/name).write_text(json.dumps(rows,indent=2,sort_keys=True)+'\n')
+          def serialize(a):return b''.join(json.dumps(r,separators=(',',':')).encode()+b'\n' for r in a)
+          def oracle(path):
+              q=subprocess.run(['elan','run','leanprover/lean4-pr-releases:pr-release-16595-cb63311','leanchecker','--from-export',str(path.resolve())],capture_output=True,timeout=120)
+              return {'official_exit':q.returncode,'official_stdout':q.stdout.decode(errors='replace'),'official_stderr':q.stderr.decode(errors='replace')}
+          d=p/'fixtures';d.mkdir()
+          witnesses=[]
+          for name in ['tutorial/044_natDef','tutorial/070_nRec','tutorial/080_nRecReduction']:
+              data=current[name];base=expected[name]
+              assert digest(data)==base['sha256'] and base['exit']==2 and base['expected']=='accept'
+              path=d/(name.rsplit('/',1)[1]+'.ndjson');path.write_bytes(data)
+              before,_=run(data,True);code,err=run(data)
+              row={'name':name,'sha256':digest(data),'before':before,'exit':code,'stderr':err,**oracle(path)}
+              witnesses.append(row);print('WITNESS '+json.dumps(row),flush=True)
+          save('witnesses.json',witnesses)
+          # Mutations are applied to actual source-owned rule expressions.
+          # Navigate the expression DAG, rather than relying on numeric IDs.
+          orig=[json.loads(l) for l in current['tutorial/070_nRec'].splitlines()]
+          at=next(i for i,r in enumerate(orig) if 'inductive' in r)
+          block=orig[at]['inductive'];rec=block['recs'][0];step=rec['rules'][1]
+          ex={r['ie']:r for r in orig if 'ie' in r}
+          step_lam=step['rhs']
+          for _ in range(3):step_lam=ex[step_lam]['lam']['body']
+          step_body=ex[step_lam]['lam']['body']
+          ih=ex[step_body]['app']['arg']
+          pred=ex[ih]['app']['arg']
+          assert ex[pred].get('bvar')==0
+          zero=next(i for i,r in ex.items() if r.get('const',{}).get('name')==block['ctors'][0]['name'])
+          def modify(f):
+              a=copy.deepcopy(orig);f(a[at]['inductive'],{r['ie']:r for r in a if 'ie' in r});return serialize(a)
+          fixtures={
+            'erased-induction-hypothesis':modify(lambda b,e:e[step_lam]['lam'].update(body=pred)),
+            'recursive-call-on-zero':modify(lambda b,e:e[ih]['app'].update(arg=zero)),
+            'swapped-rule-rhs':modify(lambda b,e:b['recs'][0]['rules'][1].update(rhs=b['recs'][0]['rules'][0]['rhs'])),
+            'wrong-constructor-rule':modify(lambda b,e:b['recs'][0]['rules'][1].update(ctor=b['ctors'][0]['name'])),
+            'wrong-recursive-field-count':modify(lambda b,e:b['ctors'][1].update(numFields=0)),
+            'false-recursion-flag':modify(lambda b,e:b['types'][0].update(isRec=False)),
+          }
+          # A concrete, genuine two-step computation pair: preserve the
+          # actual native dependencies and actual N.add source declaration
+          # from the authentic recursion theorem. Change only the asserted
+          # final equality, leaving its proof term identical.
+          prefix=[]
+          names={0:''}
+          for row in (json.loads(l) for l in current['tutorial/080_nRecReduction'].splitlines()):
+              prefix.append(row)
+              if 'in' in row:
+                  n=row.get('str',row.get('num'));names[row['in']]=names[n['pre']]+('.' if n['pre'] else '')+str(n.get('str',n.get('i')))
+              if 'def' in row and names[row['def']['name']]=='N.add':break
+          assert 'def' in prefix[-1] and names[prefix[-1]['def']['name']]=='N.add'
+          rev={v:k for k,v in names.items()}
+          assert all(n in rev for n in ('N','N.zero','N.succ','N.add','Eq','Eq.refl'))
+          level=next(r['il'] for r in prefix if r.get('succ')==0 and 'il' in r)
+          nid=max(names)+1;prefix.append({'in':nid,'str':{'pre':0,'str':'nativeUnaryRecGate'}})
+          idx=max(r['ie'] for r in prefix if 'ie' in r)+1
+          def exp(tag,value):
+              global idx
+              i=idx;idx+=1;prefix.append({'ie':i,tag:value});return i
+          def con(n,us=[]):return exp('const',{'name':rev[n],'us':us})
+          def app(f,a):return exp('app',{'fn':f,'arg':a})
+          carrier=con('N');z0=con('N.zero');succ=con('N.succ')
+          one=app(succ,z0);two=app(succ,one);sum11=app(app(con('N.add'),one),one)
+          eq_left=app(app(con('Eq',[level]),carrier),sum11)
+          good=app(eq_left,two);bad=app(eq_left,one)
+          proof=app(app(con('Eq.refl',[level]),carrier),two)
+          for name,ty in [('recursive-two-step-good',good),('recursive-two-step-false',bad)]:
+              fixtures[name]=serialize(prefix+[{'thm':{'all':[nid],'name':nid,'levelParams':[],'type':ty,'value':proof}}])
+          controls=[]
+          for name,data in fixtures.items():
+              path=d/(name+'.ndjson');path.write_bytes(data)
+              before,_=run(data,True);code,err=run(data)
+              row={'name':name,'sha256':digest(data),'before':before,'exit':code,'stderr':err,**oracle(path)}
+              controls.append(row);print('CONTROL '+json.dumps(row),flush=True)
+          save('controls.json',controls)
+          # Preserve the exact 712 previous raw exits unless an UNKNOWN
+          # becomes the published expected decision; record full receipts.
+          for cohort,ins in cohorts.items():
+              before={r['name']:r for r in json.loads(z.read(cohort+'-rows.json'))}
+              assert len(ins)==356 and set(ins)==set(before)
+              rows=[]
+              for name,data in ins.items():
+                  r=before[name];assert digest(data)==r['sha256'],name
+                  code,err=run(data)
+                  rows.append({**r,'before':r['exit'],'exit':code,'stderr':err})
+              changes=[r for r in rows if r['before']!=r['exit']]
+              summary={'input_count':len(rows),'counts':dict(collections.Counter(r['exit'] for r in rows)),'changes':changes}
+              save(cohort+'-rows.json',rows);save(cohort+'-summary.json',summary)
+              print('SUMMARY '+cohort+' '+json.dumps(summary),flush=True)
+          preserved=[]
+          for r in json.loads(iota.read('native-ab.json')):
+              data=iota.read('native/'+r['name']+'.ndjson');assert digest(data)==r['sha256']
+              code,err=run(data);preserved.append({'group':'iota','name':r['name'],'before':r['after'],'exit':code,'sha256':digest(data),'stderr':err})
+          for r in json.loads(iota.read('iota-controls.json')):
+              data=iota.read('native/mut-'+r['name']+'.ndjson');assert digest(data)==r['sha256']
+              code,err=run(data);preserved.append({'group':'iota','name':r['name'],'before':r['exit'],'exit':code,'sha256':digest(data),'stderr':err})
+          for r in json.loads(identity.read('controls.json')):
+              data=identity.read('controls/'+r['name']+'.ndjson');assert digest(data)==r['sha256']
+              code,err=run(data);preserved.append({'group':'identity','name':r['name'],'before':r['exit'],'exit':code,'sha256':digest(data),'stderr':err})
+          for r in json.loads(ordinary.read('new-regressions.json')):
+              data=ordinary.read('new-inputs/'+r['case']);assert digest(data)==r['sha256']
+              code,err=run(data);preserved.append({'group':'external','name':r['case'],'before':r['exit'],'exit':code,'sha256':digest(data),'stderr':err})
+          kfixtures={f.stem:f for folder in ('native32-typed-k','native32-partial-k') for f in (pathlib.Path('tests/fixtures')/folder).glob('*.ndjson')}
+          for r in json.loads(z.read('controls.json')):
+              data=kfixtures[r['name']].read_bytes();assert digest(data)==r['sha256']
+              code,err=run(data);preserved.append({'group':'k','name':r['name'],'before':r['exit'],'exit':code,'sha256':digest(data),'stderr':err})
+          save('preserved-controls.json',preserved)
+          print('PRESERVED '+json.dumps(dict(collections.Counter(r['group'] for r in preserved))),flush=True)
+          PY
+      - name: Enforce genuine recursion and protected verdict boundaries
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('evidence-run')
+          w=json.loads((p/'witnesses.json').read_text());assert len(w)==3
+          assert all(r['official_exit']==0 and r['before']==2 and r['exit']==0 for r in w),w
+          c=json.loads((p/'controls.json').read_text());assert len(c)==8
+          good=next(r for r in c if r['name']=='recursive-two-step-good')
+          bad=next(r for r in c if r['name']=='recursive-two-step-false')
+          assert good['before']==2 and good['official_exit']==0 and good['exit']==0,good
+          assert bad['official_exit']!=0 and bad['exit'] in (1,2),bad
+          assert all(r['exit'] in (1,2) for r in c if r['name']!='recursive-two-step-good'),c
+          for cohort in ('current','prior'):
+              s=json.loads((p/(cohort+'-summary.json')).read_text());assert s['input_count']==356
+              assert all(r['format']=='3.2.0' and r['before']==2 and r['exit']=={'accept':0,'reject':1}[r['expected']] for r in s['changes']),s
+          preserved=json.loads((p/'preserved-controls.json').read_text());assert len(preserved)==40
+          assert all(r['before']==r['exit'] for r in preserved),preserved
+          print('QUALIFIED_UNARY_RECURSION '+json.dumps({'witnesses':w,'controls':c,'preserved':len(preserved)}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-unary-recursion
+          path: evidence-run/
+          retention-days: 60
