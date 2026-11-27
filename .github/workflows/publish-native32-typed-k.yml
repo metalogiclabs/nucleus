@@ -1,0 +1,161 @@
+name: Publish exact qualified typed K source
+on:
+  push:
+    branches: [research/native32-typed-k-20261127]
+    paths: ['.github/workflows/publish-native32-typed-k.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fb903a3b61ce2b42349eb02648f11514569c2af6
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Restore exact qualified source and preserve evidence
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = fb903a3b61ce2b42349eb02648f11514569c2af6
+          test "$(git ls-remote --heads origin refs/heads/research/native32-identity-qualified-20261127 | cut -f1)" = fb903a3b61ce2b42349eb02648f11514569c2af6
+          test -z "$(git ls-remote --heads origin refs/heads/research/native32-typed-k-qualified-20261127)"
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15184156566/zip > "$RUNNER_TEMP/k.zip"
+          printf '%s  %s\n' 5f31c1d9aaf0be97e2e67ecfd5050bf347a5d9b74c4c3726d029f9659afdb70a "$RUNNER_TEMP/k.zip" | sha256sum -c -
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,zipfile
+          p=pathlib.Path(os.environ['RUNNER_TEMP']);z=zipfile.ZipFile(p/'k.zip')
+          assert len(z.namelist())==28 and z.testzip() is None
+          assert z.read('harness.txt').decode().strip()=='0a9a1a9d4a3fcb9ae364a47b790efe60605979ee'
+          assert z.read('candidate-src-tree.txt').decode().strip()=='402353fbc5898a5e8098a92f94faa44c158ab6f8'
+          assert hashlib.sha256(z.read('base.zip')).hexdigest()=='72b3db6e2d59d4025fcfbc8e140b5dfa9d057cb206c4cc6625b4740ee8e2698b'
+          base=zipfile.ZipFile(io.BytesIO(z.read('base.zip')));assert base.testzip() is None
+          for cohort,counts,changed in [('current',{0:93,1:51,2:212},['tutorial/099_ruleK']),('prior',{0:63,1:51,2:242},[])]:
+              old={r['name']:r for r in json.loads(base.read(cohort+'-rows.json'))}
+              new={r['name']:r for r in json.loads(z.read(cohort+'-rows.json'))}
+              assert len(old)==len(new)==356 and old.keys()==new.keys()
+              assert all(old[n]['sha256']==r['sha256'] and old[n]['expected']==r['expected'] and old[n]['exit']==r['before'] for n,r in new.items())
+              assert [n for n,r in new.items() if r['before']!=r['exit']]==changed
+              assert all(new[n]['before']==2 and new[n]['exit']==0 and new[n]['expected']=='accept' for n in changed)
+              assert collections.Counter(r['exit'] for r in new.values())==counts
+          w={r['name']:r for r in json.loads(z.read('witnesses.json'))}; c={r['name']:r for r in json.loads(z.read('controls.json'))}
+          assert len(w)==5 and len(c)==6
+          assert [w['tutorial/099_ruleK'][k] for k in ('baseline','iota_only','typed_k')]==[2,2,0]
+          assert [w['tutorial/100_ruleKbad'][k] for k in ('baseline','iota_only','typed_k')]==[2,2,2]
+          assert [c['constructor-major-good'][k] for k in ('baseline','iota_only','typed_k')]==[2,0,0]
+          assert all(r['typed_k'] in (1,2) for n,r in c.items() if n!='constructor-major-good')
+          prot=json.loads(z.read('protected.json'));assert len(prot)==26 and all(r['before']==r['exit'] for r in prot)
+          (p/'typed-k.patch').write_bytes(z.read('typed-k.patch'))
+          PY
+          git apply --index "$RUNNER_TEMP/typed-k.patch"
+          test "$(git rev-parse "$(git write-tree):src")" = 402353fbc5898a5e8098a92f94faa44c158ab6f8
+          python3 - <<'PY'
+          import hashlib,io,json,os,pathlib,tarfile,textwrap,zipfile
+          root=pathlib.Path('.');z=zipfile.ZipFile(pathlib.Path(os.environ['RUNNER_TEMP'])/'k.zip')
+          parent=root/'evidence/native32-identity-qualification-20261127.json';base=json.loads(parent.read_text())
+          changed='src/renovation/nullary/parametric.rs'
+          def identity(raw):
+              return {'git_blob':hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(),'sha256':hashlib.sha256(raw).hexdigest()}
+          t=tarfile.open(fileobj=io.BytesIO(z.read('candidate-source.tar.gz')))
+          sources={m.name:t.extractfile(m).read() for m in t.getmembers() if m.isfile()}
+          assert set(sources)=={k for k in base['runtime_files'] if k.startswith('src/')}
+          assert all((root/k).read_bytes()==v for k,v in sources.items())
+          runtime={k:identity((root/k).read_bytes()) for k in base['runtime_files']}
+          assert {k for k in runtime if runtime[k]!=base['runtime_files'][k]}=={changed}
+          assert runtime[changed]=={'git_blob':'f8d0e89f1e5efd6b853ea579e5c8324fa94eca4f','sha256':'a998f311feb8ab2343045c051da24b70bf58e6673a5f5eda90578657c1488a36'}
+          w=json.loads(z.read('witnesses.json'));c=json.loads(z.read('controls.json'))
+          manifest={'status':'WARRANTED_BOUNDED','original_commit':base['original_commit'],'original_src_tree':base['original_src_tree'],
+              'parent_manifest_sha256':hashlib.sha256(parent.read_bytes()).hexdigest(),'source_base_commit':'fb903a3b61ce2b42349eb02648f11514569c2af6',
+              'qualification_harness':'0a9a1a9d4a3fcb9ae364a47b790efe60605979ee',
+              'qualification_run':'https://github.com/metalogiclabs/nucleus/actions/runs/45968074994',
+              'qualification_artifact_id':15184156566,'qualification_artifact_sha256':'5f31c1d9aaf0be97e2e67ecfd5050bf347a5d9b74c4c3726d029f9659afdb70a',
+              'qualified_src_tree':'402353fbc5898a5e8098a92f94faa44c158ab6f8',
+              'qualified_candidate_tree':'3aea9f644e7de649ec9c4bdd9c84291a49e5173e',
+              'qualification_binary_sha256':'ed3428df6257638361d07a7b4990eab2653b543bf1f64a6970afcf7c298e4c37',
+              'indexed_iota_only_binary_sha256':'3fe9f49395eebf3ab5444617216072cfbee8ba674faecb2ce69214e4a95373a2',
+              'changed_runtime_files':[changed],'runtime_files':runtime,'current_corpus':{'0':93,'1':51,'2':212},'prior_corpus':{'0':63,'1':51,'2':242},
+              'witnesses':[{k:r[k] for k in ('name','sha256','expected','baseline','iota_only','typed_k')} for r in w],
+              'controls':[{k:r[k] for k in ('name','sha256','expected','baseline','iota_only','typed_k')} for r in c]}
+          (root/'evidence/native32-typed-k-qualification-20261127.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          f=root/'scripts/verify_source_import.py';s=f.read_text();marker='    expected = manifest["runtime_files"]'
+          block='''k_path = root / "evidence/native32-typed-k-qualification-20261127.json"
+          if k_path.exists():
+              previous = manifest
+              if not identity_path.exists():
+                  print("Missing parent indexed identity qualification", file=sys.stderr)
+                  return 1
+              manifest = json.loads(k_path.read_text())
+              changed = {"src/renovation/nullary/parametric.rs"}
+              if (manifest.get("status") != "WARRANTED_BOUNDED"
+                      or manifest.get("parent_manifest_sha256") != hashlib.sha256(identity_path.read_bytes()).hexdigest()
+                      or set(manifest["runtime_files"]) != set(previous["runtime_files"])
+                      or set(manifest["changed_runtime_files"]) != changed
+                      or {k for k in manifest["runtime_files"] if manifest["runtime_files"][k] != previous["runtime_files"][k]} != changed):
+                  print("Invalid typed K qualification lineage", file=sys.stderr)
+                  return 1
+          '''
+          assert s.count(marker)==1
+          f.write_text(s.replace(marker,textwrap.indent(block,'    ')+marker))
+          d=root/'tests/fixtures/native32-typed-k';d.mkdir()
+          tests=[]
+          for r in w+c:
+              name=r['name'].rsplit('/',1)[-1];raw=z.read('witnesses/'+name+'.ndjson')
+              assert hashlib.sha256(raw).hexdigest()==r['sha256']
+              (d/(name+'.ndjson')).write_bytes(raw);tests.append((name,r['typed_k']))
+          (d/'README.md').write_text('''# Typed K and indexed iota controls
+          
+          Five unchanged Arena Beta exports from commit 60654ab87757ee8b07e3a292fc546f18e8131a27
+          (Apache-2.0), plus six local mutations of the exact native K witnesses.
+          The original K pair was independently accepted/rejected by the pinned
+          official kernel. The constructor-major pair is a local structural
+          mutation, not a fresh upstream oracle export. See run 45968074994
+          and artifact 15184156566 for raw three-way results and traces.
+          UNKNOWN is not a semantic rejection.
+          ''')
+          helper=(root/'tests/native32_identity.rs').read_text().split('#[test]',1)[0].replace('native32-identity','native32-typed-k')
+          (root/'tests/native32_typed_k.rs').write_text(helper+'#[test]\nfn typed_k_native_and_negative_controls() {\n'+'\n'.join('    check('+json.dumps(n)+','+str(e)+');' for n,e in tests)+'\n}\n')
+          q=root/'docs/QUALIFICATION.md'
+          q.write_text(q.read_text()+'''
+          
+          ## Native typed K and indexed iota (2026-11-27)
+          
+          [Qualification 45968074994](https://github.com/metalogiclabs/nucleus/actions/runs/45968074994)
+          compared three builds: opaque signatures, indexed constructor iota
+          without K, and typed K. The authentic ruleK proof changed 2/2/0;
+          ruleKbad stayed 2/2/2. A local concrete constructor separator
+          changed 2/0/0, while its wrong-index counterpart stayed 2/2/2.
+          The valid trace proves constructor/major-domain compatibility;
+          the negative trace refutes it without granting reduction.
+          
+          Current native corpus 93A/51R/212U; earlier corpus 63A/51R/242U.
+          All previously decided rows and all 26 external/native controls
+          preserved. No false ACCEPT observed. This is an acceptance-only
+          bounded expansion for fully reconstructed identity families, not
+          general indexed or recursive verification. Partial recursor eta
+          and recursive dependencies still decline. Exact source and inputs
+          are retained in the qualification manifest and artifact.
+          ''')
+          PY
+          python3 -m py_compile scripts/verify_source_import.py
+          python3 scripts/verify_source_import.py
+      - name: Run permanent controls and publish stacked branch
+        run: |
+          set -euo pipefail
+          cargo test --locked --test native32_typed_k
+          python3 -m unittest discover -s tests_py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b research/native32-typed-k-qualified-20261127
+          git add src scripts/verify_source_import.py evidence/native32-typed-k-qualification-20261127.json docs/QUALIFICATION.md tests/native32_typed_k.rs tests/fixtures/native32-typed-k
+          test "$(git rev-parse "$(git write-tree):src")" = 402353fbc5898a5e8098a92f94faa44c158ab6f8
+          git commit -m "Enable typed K and indexed iota after complete native identity reconstruction"
+          git push origin HEAD:refs/heads/research/native32-typed-k-qualified-20261127
+          git rev-parse HEAD
