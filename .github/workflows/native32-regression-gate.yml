@@ -1,7 +1,7 @@
-name: Nucleus expression identity order candidate and protected replay
+name: Nucleus native 3.2 ordinary core and expression order qualification
 on:
   push:
-    branches: [research/native32-regression-gate-20261127]
+    branches: [research/native32-ordinary-core-20261127]
     paths: ['.github/workflows/native32-regression-gate.yml']
   workflow_dispatch:
 permissions:
@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.99.1'
-      - name: Verify qualified runtime and build isolated expression-order candidate
+      - name: Verify qualified runtime and build isolated native core candidate
         run: |
           set -euo pipefail
           mkdir -p evidence-run
@@ -106,11 +106,134 @@ jobs:
           once(marker,tests+marker)
           p.write_text(s)
           PY
-          git diff --exit-code -- . ':!src/renovation.rs'
-          git diff -- src/renovation.rs > evidence-run/expr-order-candidate.patch
-          git add src/renovation.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          def edit(path, changes):
+              p=Path(path); s=p.read_text()
+              for a,b in changes:
+                  assert s.count(a)==1,(path,a,s.count(a))
+                  s=s.replace(a,b)
+              p.write_text(s)
+          # Preserve the actual metadata, and keep the public legacy parser
+          # restricted to version 3.1. The native route can only consume a
+          # strict ordinary-declaration fragment selected by renovation.
+          edit('src/parser.rs',[
+              ('fn parse_meta(value: Value) -> Result<Meta, ParseError> {',
+               'fn parse_meta(value: Value) -> Result<Meta, ParseError> {\n    parse_meta_version(value, "3.1.0")\n}\n\nfn parse_meta_version(value: Value, expected: &str) -> Result<Meta, ParseError> {'),
+              ('if version != "3.1.0" {','if version != expected {'),
+              ('impl ParsedExport {',r'''/// Native ordinary declarations, already structurally checked by the
+          /// renovation envelope. No version relabeling or legacy inductive
+          /// parsing is permitted, even if an internal caller is mistaken.
+          pub(crate) fn parse_ordinary_native(
+              meta_value: Value, rows: &[Value],
+          ) -> Result<ParsedExport, ParseError> {
+              let mut export = ParsedExport {
+                  meta: parse_meta_version(meta_value, "3.2.0")?,
+                  names: IdTable::default(),
+                  levels: IdTable::default(),
+                  exprs: IdTable::default(),
+                  declarations: Vec::new(),
+              };
+              export.levels.insert(LevelId(0), Level::Zero)?;
+              for (i, value) in rows.iter().enumerate() {
+                  if value.get("in").is_none() && value.get("il").is_none()
+                      && value.get("ie").is_none() && value.get("def").is_none()
+                      && value.get("thm").is_none() {
+                      return Err(malformed(i+2, "nonordinary native declaration"));
+                  }
+                  parse_record(&mut export, value.clone(), i+2)?;
+              }
+              if export.declarations.is_empty() || export.declarations.iter().any(|d|
+                  !matches!(d, Declaration::Definition { .. } | Declaration::Theorem { .. })) {
+                  return Err(ParseError::UnsupportedFormat("nonordinary native declaration".into()));
+              }
+              Ok(export)
+          }
+
+          impl ParsedExport {''')])
+          edit('src/renovation/nullary.rs',[
+              ('pub(super) fn projection_outcome(rows:&[Value])->Option<super::Outcome>{',r'''/// Reuse the existing typed core for an export containing only safe ordinary
+          /// definitions and opaque theorems. All table records are checked by the
+          /// strict reconstruction decoder, and all declarations are checked in
+          /// source order by the independent core. In particular no axioms,
+          /// primitive literals, projections, inductives or quotient semantics
+          /// may cross this boundary. Unsupported syntax never supplies ACCEPT.
+          pub(super) fn ordinary_outcome(rows:&[Value], meta:Value)->Option<super::Outcome>{
+              use crate::verdict::Verdict;
+              if rows.len()>MAX_RECORDS {return None;}
+              let mut tables=Tables::new();
+              let mut declarations=0usize;
+              for row in rows {
+                  let (item,is_def)=if keys(row,&["def"]) {
+                      (row.get("def")?,true)
+                  } else if keys(row,&["thm"]) {
+                      (row.get("thm")?,false)
+                  } else {
+                      tables.add(row)?;
+                      continue;
+                  };
+                  if is_def {
+                      need(keys(item,&["all","hints","levelParams","name","safety","type","value"]))?;
+                      need(item.get("safety")?.as_str()?=="safe")?;
+                      let hints=item.get("hints")?;
+                      need(matches!(hints.as_str(),Some("opaque"|"abbrev"))
+                          || (keys(hints,&["regular"]) && num(hints,"regular").is_some()))?;
+                  } else {
+                      need(keys(item,&["all","levelParams","name","type","value"]))?;
+                  }
+                  let name=num(item,"name")?;
+                  need(tables.valid_name(name) && numbers(item,"all")?==[name])?;
+                  need(numbers(item,"levelParams")?.iter().all(|n|tables.valid_name(*n)))?;
+                  need(num(item,"type")?<tables.exprs.len() && num(item,"value")?<tables.exprs.len())?;
+                  declarations+=1;
+              }
+              need(declarations>0)?;
+              let export=crate::parser::parse_ordinary_native(meta,rows).ok()?.resolve().ok()?;
+              match crate::checker::check_export(export,crate::checker::Limits::default()) {
+                  Verdict::Accept=>Some(super::Outcome::AcceptOrdinary),
+                  Verdict::Reject=>Some(super::Outcome::Reject("ordinary-native-typing")),
+                  Verdict::Unknown|Verdict::Error=>None,
+              }
+          }
+
+          pub(super) fn projection_outcome(rows:&[Value])->Option<super::Outcome>{''')])
+          edit('src/renovation.rs',[
+              ('pub(crate) enum Outcome { AcceptReconstructed, Reject(&\'static str), Unknown }',
+               'pub(crate) enum Outcome { AcceptReconstructed, AcceptOrdinary, Reject(&\'static str), Unknown }'),
+              ('pub(crate) fn check<R: BufRead>(reader: R, verified_header: bool) -> Checked<Outcome> {',r'''pub(crate) fn check<R: BufRead>(reader:R, verified_header:bool)->Checked<Outcome>{
+              check_inner(reader,verified_header,None)
+          }
+
+          pub(crate) fn check_native<R:BufRead>(reader:R,header:&str)->Checked<Outcome>{
+              if !verified_header(header) {return Err("invalid native metadata");}
+              let meta=unique_json::parse(header).map_err(|_|"invalid native metadata")?;
+              if meta.pointer("/meta/format/version").and_then(Value::as_str)!=Some("3.2.0"){
+                  return Err("not native 3.2 metadata");
+              }
+              check_inner(reader,true,Some(meta))
+          }
+
+          fn check_inner<R: BufRead>(reader: R, verified_header: bool, native_meta:Option<Value>) -> Checked<Outcome> {'''),
+              ('    } else {\n        Ok(Outcome::Unknown)\n    }\n}\n\n#[cfg(test)]',
+               '    } else if let Some(outcome)=whole_export.as_ref().and_then(|rows| native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta))) {\n        Ok(outcome)\n    } else {\n        Ok(Outcome::Unknown)\n    }\n}\n\n#[cfg(test)]')])
+          edit('src/lib.rs',[
+              ('        return match renovation::check(tail, verified_header) {',r'''        let result=if version.as_deref()==Some("3.2.0") {
+                      renovation::check_native(tail,&header)
+                  } else {
+                      renovation::check(tail,verified_header)
+                  };
+                  return match result {
+                      Ok(renovation::Outcome::AcceptOrdinary) => {
+                          eprintln!("NUCLEUS_RENOVATION_ADMISSION: ordinary-native-core");
+                          Verdict::Accept
+                      }''')])
+          PY
+          git diff --exit-code -- . ':!src/renovation.rs' ':!src/renovation/nullary.rs' ':!src/parser.rs' ':!src/lib.rs'
+          git diff -- src > evidence-run/native32-candidate.patch
+          git add src
           git write-tree > evidence-run/candidate-tree.txt
           git rev-parse :src/renovation.rs > evidence-run/candidate-blob.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
           python3 scripts/test.py
           python3 -m unittest discover -s tests_py
           cargo build --locked --release --features diagnostics
@@ -181,23 +304,80 @@ jobs:
           summary={'counts':counts,'formats':formats,'changed':changes,'input_count':len(rows)}
           (out/'corpus-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
           print('CORPUS_SUMMARY '+json.dumps(summary),flush=True)
-          assert not changes,'Frozen baseline drift'
-          assert counts=={'0':30,'1':42,'2':284},counts
+          old={'accept':0,'reject':1}
+          assert all(r['official_previous_exit']==2 and r['expected'] in old and r['exit']==old[r['expected']] for r in changes),changes
+          selected={r['name']:r['exit'] for r in rows}
+          assert selected['tutorial/001_basicDef']==0 and selected['tutorial/002_badDef']==1,selected
           PY
-      - name: Enforce predeclared transport-only result
+      - name: Test native core boundary and frozen prior cohort
+        run: |
+          set -euo pipefail
+          gh api repos/heathsanchez/test/actions/artifacts/15053582604/zip > evidence-run/prior-qualification.zip
+          printf '%s  %s\n' d8a2cb8b5c92bb14dea63fb019086e6c7f8a6b6183d804681f53a50fb8c145ee evidence-run/prior-qualification.zip | sha256sum -c -
+          python3 - <<'PY'
+          import hashlib,io,json,pathlib,subprocess,tarfile,zipfile
+          p=pathlib.Path('evidence-run')
+          def run(b):return subprocess.run(['python3','arena.py'],input=b,capture_output=True,timeout=120)
+          z=zipfile.ZipFile(p/'test-tarball.zip')
+          t=tarfile.open(fileobj=io.BytesIO(z.read('lean-arena-tests.tar.gz')))
+          m=next(m for m in t.getmembers() if m.name.endswith('/001_basicDef.ndjson'))
+          good=t.extractfile(m).read()
+          rows=[json.loads(l) for l in good.splitlines()]
+          def mutate(f):
+              x=json.loads(json.dumps(rows));f(x)
+              return b''.join(json.dumps(r,separators=(',',':')).encode()+b'\n' for r in x)
+          cases=[
+              ('authentic',good,0),
+              ('unsafe',mutate(lambda x:x[-1]['def'].update(safety='unsafe')),2),
+              ('missing-type',mutate(lambda x:x[-1]['def'].update(type=100)),2),
+              ('extra-field',mutate(lambda x:x[-1]['def'].update(forged=True)),2),
+              ('unsupported-literal',mutate(lambda x:x.insert(-1,{'ie':2,'natVal':'0'})),2),
+              ('unsupported-axiom',mutate(lambda x:x.append({'axiom':{'name':1,'levelParams':[],'type':0}})),2),
+              ('duplicate-expression',mutate(lambda x:x.insert(-1,dict(x[-2]))),3),
+              ('duplicate-json-key',good.replace(b'"name":1,"safety"',b'"name":1,"name":1,"safety"'),3),
+              ('forward-const',mutate(lambda x:(x.insert(-1,{'ie':2,'const':{'name':1,'us':[]}}),x[-1]['def'].update(value=2))),None),
+          ]
+          controls=[]
+          for name,raw,expected in cases:
+              q=run(raw); row={'case':name,'sha256':hashlib.sha256(raw).hexdigest(),'exit':q.returncode,'expected':expected,'stderr':q.stderr.decode(errors='replace')}
+              controls.append(row);print('CONTROL '+json.dumps(row),flush=True)
+              assert q.returncode==expected if expected is not None else q.returncode in (1,2),row
+          (p/'boundary-controls.json').write_text(json.dumps(controls,indent=2)+'\n')
+          old=zipfile.ZipFile(p/'prior-qualification.zip');assert old.testzip() is None
+          prior={r['name']:r for r in json.loads(old.read('beta-rows.json'))}
+          inner=zipfile.ZipFile(io.BytesIO(old.read('tarball.zip')));assert inner.testzip() is None
+          tar=tarfile.open(fileobj=io.BytesIO(inner.read('lean-arena-tests.tar.gz')))
+          old_rows=[];changes=[]
+          for m in tar.getmembers():
+              if not m.isfile() or not m.name.endswith('.ndjson'):continue
+              name=m.name.split('/',1)[1].removesuffix('.ndjson')
+              raw=tar.extractfile(m).read(); a=prior[name]; digest=hashlib.sha256(raw).hexdigest()
+              assert digest==a['sha256'],name
+              q=run(raw); row={'name':name,'sha256':digest,'format':a['format'],'expected':a['expected'],'old':a['raw_exit'],'new':q.returncode}
+              old_rows.append(row)
+              if q.returncode!=a['raw_exit']:changes.append(row)
+              print('PRIOR '+json.dumps(row),flush=True)
+          (p/'prior-rows.json').write_text(json.dumps(old_rows,indent=2)+'\n')
+          assert len(old_rows)==356
+          assert all(r['format']=='3.2.0' and r['old']==2 and r['expected'] in ('accept','reject') and r['new']=={'accept':0,'reject':1}[r['expected']] for r in changes),changes
+          print('PRIOR_SUMMARY '+json.dumps({'count':len(old_rows),'changes':changes}),flush=True)
+          PY
+      - name: Enforce predeclared regression and native core result
         if: always()
         run: |
           python3 - <<'PY'
           import json,pathlib
           p=pathlib.Path('evidence-run')
-          r=json.loads((p/'new-regressions.json').read_text()); c=json.loads((p/'corpus-summary.json').read_text())
+          r=json.loads((p/'new-regressions.json').read_text());c=json.loads((p/'corpus-summary.json').read_text())
           assert len(r)==4 and [x['exit'] for x in r]==[2,2,1,2],r
-          assert not c['changed'] and c['input_count']==356 and c['counts']=={'0':30,'1':42,'2':284},c
-          print('Transport-only candidate: ERROR -> UNKNOWN; 356 exact verdicts preserved. Semantic completeness not established.')
+          assert c['input_count']==356 and c['changed'],c
+          assert len(json.loads((p/'prior-rows.json').read_text()))==356
+          assert len(json.loads((p/'boundary-controls.json').read_text()))==9
+          print('NATIVE_CORE_SUMMARY '+json.dumps({'counts':c['counts'],'gains':len(c['changed']),'changes':[(r['name'],r['exit']) for r in c['changed']]}))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: nucleus-expression-order-candidate
+          name: nucleus-native32-ordinary-core-candidate
           path: evidence-run/
           retention-days: 60
