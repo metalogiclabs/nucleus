@@ -1,0 +1,218 @@
+name: Publish exact qualified composition and iota source
+on:
+  push:
+    branches: [research/native32-certified-iota-20261127]
+    paths: ['.github/workflows/publish-native32-iota.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Verify and restore exact runtime source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d
+          test "$(git ls-remote --heads origin refs/heads/research/native32-ordinary-qualified-20261127 | cut -f1)" = b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d
+          test -z "$(git ls-remote --heads origin refs/heads/research/native32-computation-qualified-20261127)"
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15173687615/zip > "$RUNNER_TEMP/iota.zip"
+          printf '%s  %s\n' 904f723417fae29ee959e89d335bfa9c93934fc38f5846013c09a4cdfa99ce61 "$RUNNER_TEMP/iota.zip" | sha256sum -c -
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,tarfile,zipfile
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])
+          z=zipfile.ZipFile(p/'iota.zip')
+          assert len(z.namelist())==31 and z.testzip() is None
+          assert z.read('harness.txt').decode().strip()=='f8381d6fe1c08bc9ae4cca44cea6c02e2f1bfebd'
+          assert z.read('candidate-src-tree.txt').decode().strip()=='b054f118067af2a4f5c3113ff81bc9d987bba88f'
+          assert hashlib.sha256(z.read('composition.zip')).hexdigest()=='3bff9bdb17692b74ca729b9e88a0d3de067de92b0a30fcee687b3e4caeba3f98'
+          c=zipfile.ZipFile(io.BytesIO(z.read('composition.zip')));assert c.testzip() is None
+          for cohort,expected in [('current',{0:82,1:51,2:223}),('prior',{0:63,1:51,2:242})]:
+              old={r['name']:r for r in json.loads(c.read(cohort+'-rows.json'))}
+              new={r['name']:r for r in json.loads(z.read(cohort+'-rows.json'))}
+              assert len(old)==len(new)==356 and set(old)==set(new)
+              assert all(old[n]['sha256']==new[n]['sha256'] and old[n]['expected']==new[n]['expected'] and old[n]['exit']==new[n]['before']==new[n]['exit'] for n in old)
+              assert collections.Counter(r['exit'] for r in new.values())==expected
+          native=json.loads(z.read('native-ab.json'));controls=json.loads(z.read('iota-controls.json'))
+          assert len(native)==7 and all(r['before']==2 and r['after']==(0 if r['expected']==0 else 2) for r in native)
+          assert len(controls)==5 and sorted(r['exit'] for r in controls)==[1,1,2,2,2]
+          assert [r['exit'] for r in json.loads(z.read('external.json'))]==[2,2,1,2]
+          (p/'composition.patch').write_bytes(z.read('composition.patch'))
+          (p/'iota.patch').write_bytes(z.read('iota.patch'))
+          PY
+          git apply --index "$RUNNER_TEMP/composition.patch"
+          test "$(git rev-parse "$(git write-tree):src")" = f513371efc844364bb62ef3a556a43f82164c76c
+          git apply --index "$RUNNER_TEMP/iota.patch"
+          test "$(git rev-parse "$(git write-tree):src")" = b054f118067af2a4f5c3113ff81bc9d987bba88f
+          python3 - <<'PY'
+          import hashlib,io,json,os,pathlib,tarfile,zipfile
+          root=pathlib.Path('.')
+          z=zipfile.ZipFile(pathlib.Path(os.environ['RUNNER_TEMP'])/'iota.zip')
+          parent=root/'evidence/native32-ordinary-qualification-20261127.json'
+          base=json.loads(parent.read_text())
+          pins={
+              'src/renovation.rs':'bb03e8d91388823d8d1881d44fb0185cc1a08090',
+              'src/renovation/nullary.rs':'23a5c94d9281eecec228dd212e88dbf6e393e12f',
+              'src/renovation/nullary/parametric.rs':'e36956831604b3542a4d40f62e8555ed08ecd716',
+              'src/renovation/nullary/composite.rs':'c542c9a1a9aa3a1a1123ede1dc3130d486ced84f'}
+          def identity(b):
+              return {'git_blob':hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest(),'sha256':hashlib.sha256(b).hexdigest()}
+          tar=tarfile.open(fileobj=io.BytesIO(z.read('candidate-source.tar.gz')))
+          actual={m.name:tar.extractfile(m).read() for m in tar.getmembers() if m.isfile()}
+          expected={k for k in base['runtime_files'] if k.startswith('src/')}|{'src/renovation/nullary/composite.rs'}
+          assert set(actual)==expected and len(actual)==25
+          assert all((root/k).read_bytes()==v for k,v in actual.items())
+          runtime={k:identity((root/k).read_bytes()) for k in set(base['runtime_files'])|{'src/renovation/nullary/composite.rs'}}
+          assert {k for k in runtime if runtime[k]!=base['runtime_files'].get(k)}==set(pins)
+          assert all(runtime[k]['git_blob']==v for k,v in pins.items())
+          native=json.loads(z.read('native-ab.json')); controls=json.loads(z.read('iota-controls.json'))
+          manifest={'status':'WARRANTED_BOUNDED','original_commit':base['original_commit'],'original_src_tree':base['original_src_tree'],
+              'parent_manifest_sha256':hashlib.sha256(parent.read_bytes()).hexdigest(),
+              'source_base_commit':'b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d','qualification_harness':'f8381d6fe1c08bc9ae4cca44cea6c02e2f1bfebd',
+              'qualification_run':'https://github.com/metalogiclabs/nucleus/actions/runs/45943776855',
+              'qualification_artifact_id':15173687615,'qualification_artifact_sha256':'904f723417fae29ee959e89d335bfa9c93934fc38f5846013c09a4cdfa99ce61',
+              'qualified_src_tree':'b054f118067af2a4f5c3113ff81bc9d987bba88f',
+              'qualified_candidate_tree':'cfbf74865a8818543346260652f68b9c55348bf4',
+              'qualification_binary_sha256':'feb26084a8893d677d9d1fea66a914aa08e6c3e9ee928dd1eb721da14c6ada48',
+              'composition_run':'https://github.com/metalogiclabs/nucleus/actions/runs/45940578030',
+              'composition_artifact_sha256':'3bff9bdb17692b74ca729b9e88a0d3de067de92b0a30fcee687b3e4caeba3f98',
+              'added_runtime_files':['src/renovation/nullary/composite.rs'],
+              'changed_runtime_files':sorted(pins),'runtime_files':runtime,'current_corpus':{'0':82,'1':51,'2':223},
+              'prior_corpus':{'0':63,'1':51,'2':242},
+              'native_computation_witnesses':[{k:r[k] for k in ('name','sha256','expected','before','after')} for r in native],
+              'native_mutation_controls':[{k:r[k] for k in ('name','sha256','exit')} for r in controls]}
+          (root/'evidence/native32-computation-qualification-20261127.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          # Preserve both historical manifests. Explicitly allow only the new
+          # checked source file and exact set of source deltas.
+          f=root/'scripts/verify_source_import.py'
+          s=f.read_text();marker='    expected = manifest["runtime_files"]'
+          addition='''    computation_path = root / "evidence/native32-computation-qualification-20261127.json"
+          if computation_path.exists():
+              previous = manifest
+              if not qualified_path.exists():
+                  print("Missing parent qualification manifest", file=sys.stderr)
+                  return 1
+              manifest = json.loads(computation_path.read_text())
+              added = {"src/renovation/nullary/composite.rs"}
+              changed = {"src/renovation.rs", "src/renovation/nullary.rs",
+                         "src/renovation/nullary/parametric.rs"} | added
+              if (manifest.get("status") != "WARRANTED_BOUNDED"
+                      or manifest.get("parent_manifest_sha256") != hashlib.sha256(qualified_path.read_bytes()).hexdigest()
+                      or set(manifest["added_runtime_files"]) != added
+                      or set(manifest["changed_runtime_files"]) != changed
+                      or set(manifest["runtime_files"]) != set(previous["runtime_files"]) | added
+                      or {k for k in manifest["runtime_files"] if manifest["runtime_files"][k] != previous["runtime_files"].get(k)} != changed):
+                  print("Invalid computation qualification lineage", file=sys.stderr)
+                  return 1
+          '''
+          assert s.count(marker)==1
+          f.write_text(s.replace(marker,addition+marker))
+          fixtures=root/'tests/fixtures/native32-iota';fixtures.mkdir()
+          for r in native:
+              raw=z.read('native/'+r['name']+'.ndjson')
+              assert hashlib.sha256(raw).hexdigest()==r['sha256']
+              (fixtures/(r['name']+'.ndjson')).write_bytes(raw)
+          for r in controls:
+              raw=z.read('native/mut-'+r['name']+'.ndjson')
+              assert hashlib.sha256(raw).hexdigest()==r['sha256']
+              (fixtures/('mut-'+r['name']+'.ndjson')).write_bytes(raw)
+          (fixtures/'IotaGate.lean').write_bytes(z.read('IotaGate.lean'))
+          (fixtures/'README.md').write_text('''# Native recursor computation controls
+          
+          The authored IotaGate.lean uses Tutorial.Meta from Arena Beta commit
+          60654ab87757ee8b07e3a292fc546f18e8131a27 (Apache-2.0). The native
+          NDJSON exports were generated by Lean PR release 16595-cb63311.
+          See the exact qualification artifact 15173687615 for official
+          kernel verdicts, source pin, and A/B run. Mutations change rule
+          metadata on the actual Boolean export. These files are fixtures
+          only; runtime code has no input-name or digest-based dispatch.
+          ''')
+          (root/'tests/native32_iota.rs').write_text(r'''use std::io::Write;
+          use std::process::{Command, Stdio};
+          use std::path::Path;
+          
+          fn check(name: &str, expected: i32) {
+              let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+              let flags: std::collections::HashMap<String,String> =
+                  serde_json::from_slice(&std::fs::read(root.join("arena-flags.json")).unwrap()).unwrap();
+              let mut cmd = Command::new(env!("CARGO_BIN_EXE_metatron-kernel"));
+              for (key, _) in std::env::vars_os() {
+                  let s = key.to_string_lossy();
+                  if s.starts_with("NUCLEUS_") || s.starts_with("METATRON_") {
+                      cmd.env_remove(key);
+                  }
+              }
+              cmd.envs(flags).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+              let bytes = std::fs::read(root.join("tests/fixtures/native32-iota").join(format!("{name}.ndjson"))).unwrap();
+              let mut child = cmd.spawn().unwrap();
+              child.stdin.take().unwrap().write_all(&bytes).unwrap();
+              let output = child.wait_with_output().unwrap();
+              assert_eq!(output.status.code(),Some(expected),"{name}: {}",String::from_utf8_lossy(&output.stderr));
+          }
+          
+          #[test]
+          fn native_checked_recursor_computations() {
+              for name in ["boolGood","boolOther","fieldGood","surplusGood"] { check(name,0); }
+          }
+          #[test]
+          fn native_false_computations_decline() {
+              for name in ["boolBad","fieldBad","surplusBad"] { check(name,2); }
+          }
+          #[test]
+          fn malformed_rule_certificates_do_not_supply_authority() {
+              for name in ["mut-swapped-rhs","mut-wrong-constructor","mut-missing-rule"] { check(name,2); }
+              for name in ["mut-fake-k","mut-small-elim-with-rules"] { check(name,1); }
+          }
+          ''')
+          q=root/'docs/QUALIFICATION.md'
+          q.write_text(q.read_text()+'''
+          
+          ## Certified nonrecursive composition and computation (2026-11-27)
+          
+          [Composition qualification](https://github.com/metalogiclabs/nucleus/actions/runs/45940578030)
+          recovered 20 correct ACCEPTs on the current native 356-input cohort,
+          and one on the earlier cohort. The [iota qualification](https://github.com/metalogiclabs/nucleus/actions/runs/45943776855)
+          preserved every one of these verdicts: current 82A/51R/223U,
+          earlier 63A/51R/242U. The cohorts overlap.
+          
+          Four newly generated native 3.2 exports exercising constructor
+          selection, field substitution and surplus arguments changed from
+          UNKNOWN to ACCEPT; the official pinned Lean kernel accepted each.
+          Three invalid computation witnesses stayed UNKNOWN. Five malformed
+          rule controls produced two REJECTs and three UNKNOWNs. Exact source,
+          fixtures, A/B and both protected replays are retained in
+          [artifact 15173687615](https://github.com/metalogiclabs/nucleus/actions/runs/45943776855/artifacts/15173687615)
+          and the [new source manifest](../evidence/native32-computation-qualification-20261127.json).
+          These are bounded local results, not an updated official Arena score.
+          General indexed equality, recursion, eta, K and full Mathlib remain
+          outside the established new capability.
+          ''')
+          PY
+          python3 -m py_compile scripts/verify_source_import.py
+          python3 scripts/verify_source_import.py
+          test "$(git rev-parse "$(git write-tree):src")" = b054f118067af2a4f5c3113ff81bc9d987bba88f
+      - name: Verify permanent native computation tests and publish review branch
+        run: |
+          set -euo pipefail
+          cargo test --locked --test native32_iota
+          python3 -m unittest discover -s tests_py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b research/native32-computation-qualified-20261127
+          git add src scripts/verify_source_import.py evidence/native32-computation-qualification-20261127.json docs/QUALIFICATION.md tests/native32_iota.rs tests/fixtures/native32-iota
+          test "$(git rev-parse "$(git write-tree):src")" = b054f118067af2a4f5c3113ff81bc9d987bba88f
+          git commit -m "Compose verified nonrecursive families and execute reconstructed native iota rules"
+          git push origin HEAD:refs/heads/research/native32-computation-qualified-20261127
+          git rev-parse HEAD
