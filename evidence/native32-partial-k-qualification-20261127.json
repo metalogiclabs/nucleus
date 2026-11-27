@@ -1,0 +1,496 @@
+{
+  "changed_runtime_files": [
+    "src/convert.rs",
+    "src/typecheck.rs"
+  ],
+  "controls": [
+    {
+      "before": 0,
+      "exit": 0,
+      "name": "099_ruleK",
+      "official_exit": 0,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel accepts the solution\n",
+      "sha256": "b721d200f9e5e5c7ce34bb9a6f4f04385a36d587d6bebae6f5513de22379fdff",
+      "stderr": "NUCLEUS_RENOVATION_ADMISSION: complete-inductive-block\n"
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "100_ruleKbad",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: while replaying declaration 'ruleKbad':\n(kernel) declaration type mismatch, 'ruleKbad' has type\n  Eq Bool.true Bool.false \u2192 \u2200 (a : Bool), Eq a a\nbut it is expected to have type\n  \u2200 (h : Eq Bool.true Bool.false) (a : Bool), Eq (Eq.rec a h) a\n",
+      "sha256": "2db9620f1a14188784b78e7e4562f177115cd767be1cd3e0b0f177508cd8364b",
+      "stderr": ""
+    },
+    {
+      "before": 2,
+      "exit": 0,
+      "name": "129_etaRuleK",
+      "official_exit": 0,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel accepts the solution\n",
+      "sha256": "c45ef949f9a3545fa1716e34801b1d9a24993c4b8696307d353abcdacfdc8cdb",
+      "stderr": "NUCLEUS_RENOVATION_ADMISSION: complete-inductive-block\n"
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "075_typeSingletonRecReduction",
+      "official_exit": 0,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel accepts the solution\n",
+      "sha256": "4896d0393d5deacaab32ec6eaee00508b784f15e3b4178666b871474ab95c0d9",
+      "stderr": ""
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "041_kEqK",
+      "official_exit": 0,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel accepts the solution\n",
+      "sha256": "566bf0ecbb9963d1d08684e35b9aa715c84ed6212d999d972bb1b21df883fcb1",
+      "stderr": ""
+    },
+    {
+      "before": 0,
+      "exit": 0,
+      "name": "constructor-major-good",
+      "official_exit": 0,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel accepts the solution\n",
+      "sha256": "66c3c8d90e46a400baa353b1e79b987e680e6942070554b0916b328359cf028b",
+      "stderr": "NUCLEUS_RENOVATION_ADMISSION: complete-inductive-block\n"
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "constructor-major-wrong-index",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: while replaying declaration 'ruleKbad':\n(kernel) application type mismatch\n  Eq.rec a \u22ef\nargument has type\n  Eq Bool.true Bool.true\nbut function has type\n  (t : Eq Bool.true Bool.false) \u2192 (fun x x_1 => Bool) Bool.false t\n",
+      "sha256": "e3fa1973ac51be2ad8319a6fc7d099f7e8f0744f51ed73702f2f89181cb2779a",
+      "stderr": ""
+    },
+    {
+      "before": 1,
+      "exit": 1,
+      "name": "withdraw-k",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: while replaying declaration 'Eq':\n(kernel) Type is incorrectly marked as having large elimination\n",
+      "sha256": "6c96dcdf8c1204224afd7dd90d946b124716c9430acc4295674f5c5227c0f32a",
+      "stderr": "NUCLEUS_RENOVATION_REFUTATION: large-elimination-prop-shape\n"
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "forged-rhs",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: Invalid recursor Eq.rec\n",
+      "sha256": "bdada18c8835d77007dc53a361a92497e1f576bab646b8603a0ffd9e66988041",
+      "stderr": ""
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "wrong-index-metadata",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: Invalid recursor Eq.rec\n",
+      "sha256": "b8f21b1bb8961e538425212d6e7fdff5c9c565b29192b7da473e4273d25329d2",
+      "stderr": ""
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "wrong-ctor",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: Invalid recursor Eq.rec\n",
+      "sha256": "6d33c27c2984b875bb849ceb063c77551e9a5d504ae83e6f47f89cd32b90a358",
+      "stderr": ""
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "partial-wrong-index",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: while replaying declaration 'etaRuleK':\n(kernel) application type mismatch\n  Eq (Eq.rec (a \u22ef))\nargument has type\n  (t : Eq Bool.true Bool.false) \u2192 (fun x x_1 => Bool) Bool.false t\nbut function has type\n  (Eq Bool.true Bool.true \u2192 Bool) \u2192 (Eq Bool.true Bool.true \u2192 Bool) \u2192 Prop\n",
+      "sha256": "5210453cceb75c1aa7d1e7ffd778722eb7ff111ec0d1794fd51a7992dc1a9e0a",
+      "stderr": ""
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "partial-untyped-minor",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: while replaying declaration 'etaRuleK':\n(kernel) declaration type mismatch, 'etaRuleK' has type\n  \u2200 (a : Eq Bool.true Bool.true \u2192 Bool), Eq a a\nbut it is expected to have type\n  \u2200 (a : Eq Bool.true Bool.true \u2192 Bool), Eq (Eq.rec Bool.false) a\n",
+      "sha256": "daaa4e27ce73baa0819daea685764c1a9f4d1183c2881c25c72a2de73dcb9ed4",
+      "stderr": ""
+    },
+    {
+      "before": 2,
+      "exit": 2,
+      "name": "full-wrong-major",
+      "official_exit": 1,
+      "official_stderr": "",
+      "official_stdout": "Lean default kernel rejects the solution: while replaying declaration 'ruleKbad':\n(kernel) application type mismatch\n  Eq.rec a h\nargument has type\n  Eq Bool.true Bool.false\nbut function has type\n  (t : Eq Bool.true Bool.true) \u2192 (fun x x_1 => Bool) Bool.true t\n",
+      "sha256": "20263b97d0a1726235125004c2c567a4546a1082aa6790af1e7ab4b1aeb1b826",
+      "stderr": ""
+    }
+  ],
+  "current_corpus": {
+    "0": 94,
+    "1": 51,
+    "2": 211
+  },
+  "current_gains": [
+    {
+      "before": 2,
+      "exit": 0,
+      "expected": "accept",
+      "format": "3.2.0",
+      "name": "renovation/129_etaRuleK",
+      "sha256": "c45ef949f9a3545fa1716e34801b1d9a24993c4b8696307d353abcdacfdc8cdb",
+      "stderr": "NUCLEUS_RENOVATION_ADMISSION: complete-inductive-block\n"
+    }
+  ],
+  "development_lineage": [
+    {
+      "artifact_sha256": "0913cbaf337b95f8558ecdd41d718e682bc0ea29b6a4aa1b3c12afa873e7db06",
+      "qualification_run": "https://github.com/metalogiclabs/nucleus/actions/runs/45969563740",
+      "result": "Independent precursor passed 712 rows and 11 native oracle controls. Its full-K gain overlapped concurrent PR #4. Preserve as evidence, not a second discovery.",
+      "source_tree": "a55e71e3f200e8adff676808575a88d57011d474",
+      "state": "SUPERSEDED_AS_PUBLICATION_TARGET"
+    },
+    {
+      "result": "129_etaRuleK returned UNKNOWN before the partial eta change. All three new malformed argument/index controls already declined.",
+      "state": "SUPERSEDED",
+      "verification_boundary": "local debug subprocess regression on exact PR #4 source"
+    }
+  ],
+  "incorrect_new_verdicts": 0,
+  "lost_decisive_verdicts": 0,
+  "original_commit": "578697991a903ab78d344aa71165d465bef3c3d7",
+  "original_src_tree": "362242c265ee2b1758645c78ad141ad78bf6f8c2",
+  "parent_manifest_sha256": "af19be9492e316f4a095044d58347c47a4dfbe46e58f467ad02713b4f72ca622",
+  "preserved_controls": [
+    {
+      "exit": 2,
+      "group": "iota",
+      "name": "boolBad",
+      "sha256": "42f4b08fc4e10a4b03f9a066c37d900fb705cbb9e8416af9db02efa879fc85ac"
+    },
+    {
+      "exit": 0,
+      "group": "iota",
+      "name": "boolGood",
+      "sha256": "403ae28d3c28e458d041a56272893d70d4a44914ba7fa182d2857562669d7383"
+    },
+    {
+      "exit": 0,
+      "group": "iota",
+      "name": "boolOther",
+      "sha256": "0d8b9820cbe7bba881936031feed7bd94bc0d3bc612f526bb1155eee366e44bb"
+    },
+    {
+      "exit": 2,
+      "group": "iota",
+      "name": "fieldBad",
+      "sha256": "c46ca0b5c3a0c19033e3e9e6ad1fe860a0ee6ebf13b57da6bbdae8deec635cc1"
+    },
+    {
+      "exit": 0,
+      "group": "iota",
+      "name": "fieldGood",
+      "sha256": "d4ae35e2d35ddc568da7ead168c648bcd24fb272e40b84a4d8f1a0f4fa76cb7f"
+    },
+    {
+      "exit": 2,
+      "group": "iota",
+      "name": "surplusBad",
+      "sha256": "eb2e5babb80777386066a30cb98fae3cd2e593445f0039b0a962de11d4cebc33"
+    },
+    {
+      "exit": 0,
+      "group": "iota",
+      "name": "surplusGood",
+      "sha256": "15da2d92f647ceae0412b77eebbb36bd479a5d684fcacf86f4dad6039e5c4e57"
+    },
+    {
+      "exit": 2,
+      "group": "iota",
+      "name": "swapped-rhs",
+      "sha256": "1b7410cf54bc3cd3d30d2d699d0674bd251047599890c3dcdbfdd4d43c5c5baf"
+    },
+    {
+      "exit": 2,
+      "group": "iota",
+      "name": "wrong-constructor",
+      "sha256": "b5a95e2e59210d3e3e14f58fbb8938aa50ff992eaaac9ef6d0bba30a66ce60b8"
+    },
+    {
+      "exit": 2,
+      "group": "iota",
+      "name": "missing-rule",
+      "sha256": "1b2f7ec176b2cd5dc4c67590de0222b48e292896bf83e05d88b564b604e325d8"
+    },
+    {
+      "exit": 1,
+      "group": "iota",
+      "name": "fake-k",
+      "sha256": "6e4d2926bfd8889a3ed161061f61402920ab619c1f5166ba1004402cb1354478"
+    },
+    {
+      "exit": 1,
+      "group": "iota",
+      "name": "small-elim-with-rules",
+      "sha256": "64a907755be6154c6a48a0a97d229db5bd29a27a06323a76395d7ae67864cc47"
+    },
+    {
+      "exit": 2,
+      "group": "identity",
+      "name": "missing-rule",
+      "sha256": "30dbbc8200553c6313681ee10df7f9f5f21c92e5db5c2bf77291b249093ecac1"
+    },
+    {
+      "exit": 2,
+      "group": "identity",
+      "name": "forged-rule",
+      "sha256": "58862a7944d8749bf3944ad981727f2e43d8f2c046586dc9733430a31df8d9f2"
+    },
+    {
+      "exit": 2,
+      "group": "identity",
+      "name": "forged-recursor-type",
+      "sha256": "74066b1ee9819296bee125a35a52e46447997e4ce2b2d574011d996d9f83e0f6"
+    },
+    {
+      "exit": 1,
+      "group": "identity",
+      "name": "forged-constructor-result",
+      "sha256": "728b07982ce4cfbee9674660a3cd78da348dcad4615f048ab363b5206d55c0ee"
+    },
+    {
+      "exit": 2,
+      "group": "identity",
+      "name": "wrong-owner",
+      "sha256": "9622af1ba85ed175e838bfa7bc39e1447f41763f12c6ee403aa856f7707950e8"
+    },
+    {
+      "exit": 2,
+      "group": "identity",
+      "name": "wrong-index-count",
+      "sha256": "049b3ad63fb04ca40467565fb44a22bda04ae63a0efeee8568be203f14adec93"
+    },
+    {
+      "exit": 1,
+      "group": "identity",
+      "name": "fake-projection",
+      "sha256": "c9596f144de45fdbea3267b10f1fdc25014916a9aa6c81f254180238504fde86"
+    },
+    {
+      "exit": 1,
+      "group": "identity",
+      "name": "false-k-agreement",
+      "sha256": "c655b5bcd8d7aca312d09d6f9fbc97ec04523d0b215e3472eb8addccb70902f8"
+    },
+    {
+      "exit": 0,
+      "group": "identity",
+      "name": "identity-true",
+      "sha256": "c557bf522283363267e473657b1841784019fbe7de9fa930ddb9c1d53e375e93"
+    },
+    {
+      "exit": 2,
+      "group": "identity",
+      "name": "identity-false",
+      "sha256": "22916978c0a0b4888209a5e01986c8238eac9a4c4b28c48708d8152ee1c068b3"
+    },
+    {
+      "exit": 2,
+      "group": "external",
+      "name": "good_cases_shape_keeps_ih.ndjson",
+      "sha256": "dc1f6d496bac67900f7fa0ac7380eff6f8e34ec235b7dd0ede7b4b0a56080b17"
+    },
+    {
+      "exit": 2,
+      "group": "external",
+      "name": "bad_cases_shape_keeps_ih.ndjson",
+      "sha256": "175863977916bf44b6839613d2000afd93dab8b9cfa49fb1739c57b7bd81f17b"
+    },
+    {
+      "exit": 1,
+      "group": "external",
+      "name": "bad_nat_log2_by_name_31.ndjson",
+      "sha256": "02908000d88ddcca576267d15b23783aaadb975d2d19cfee70fdbaeeea39ba76"
+    },
+    {
+      "exit": 2,
+      "group": "external",
+      "name": "nat-without-succ-ab.ndjson",
+      "sha256": "7291cf68917506539fa018e9c424d1b82f4a3ad2f3257102797ef7e51ff0f26e"
+    }
+  ],
+  "prior_corpus": {
+    "0": 64,
+    "1": 51,
+    "2": 241
+  },
+  "prior_gains": [
+    {
+      "before": 2,
+      "exit": 0,
+      "expected": "accept",
+      "format": "3.2.0",
+      "name": "renovation/129_etaRuleK",
+      "sha256": "1d688bc54c5ba3925bf2dd140016f47321284a4b76bd745014f95b2b031222ba",
+      "stderr": "NUCLEUS_RENOVATION_ADMISSION: complete-inductive-block\n"
+    }
+  ],
+  "protected_corpus_inputs": 712,
+  "python_tests": 27,
+  "qualification_artifact_id": 15185455830,
+  "qualification_artifact_sha256": "21016ab278975d5344d1ae47f9c58d2645b4dc2b1027e522ab6e507dbca4a526",
+  "qualification_binary_sha256": "c733d9710596c8556dfc138352ec1c4616e6284054c0e7df61ec1dc0f27cf77b",
+  "qualification_harness": "64cc4812789f9e602893f636198c06a903dc1bf3",
+  "qualification_run": "https://github.com/metalogiclabs/nucleus/actions/runs/45970879447",
+  "qualified_candidate_tree": "bed8a836771d08b213736fd17dcd6bea93d0c3f4",
+  "qualified_src_tree": "1f0d18bf3ca366d357f76f72290916ee85d0617a",
+  "residuals": [
+    "False Boolean equality remains UNKNOWN.",
+    "Only exactly one missing K major is opened; bounded support and type inference may decline other partial applications.",
+    "Neutral singleton structure eta and recursive/nested inductives remain unresolved.",
+    "No new official Arena score or whole-Mathlib acceptance is claimed."
+  ],
+  "runtime_files": {
+    "Cargo.lock": {
+      "git_blob": "7ff1b6917d801bbb3f9f54f256f95d6059d10ed0",
+      "sha256": "3dc517a448863bac6588ad65c73f7e5679fd84d642394453330ac1dd6151c22c"
+    },
+    "Cargo.toml": {
+      "git_blob": "262e8586b9ca21f480aef057b15d16723ddf471c",
+      "sha256": "5a448ecdebcb3e4a65977885f4f950b209dc8a544656e1cad3c1f57bd5560955"
+    },
+    "arena-flags.json": {
+      "git_blob": "1aeb2cab519c1afb51b2946d630dcdc67e201614",
+      "sha256": "ae08278265b25270208c483a8b10d0c010b39822df382627dc3fdf29a7e1ed4c"
+    },
+    "arena.py": {
+      "git_blob": "f1e01d9f5609a9c748e79b71c664e9b2d1cedbf9",
+      "sha256": "98044c312f736b0e23e601ba24a102c1b016428ac51783d5338b7838a08e1580"
+    },
+    "src/capability.rs": {
+      "git_blob": "193ff62e6b9628e79c8871d92915db17e2425efb",
+      "sha256": "465c7b8f6a8e23f7e6900320aebb356f2f6291795a5923565685022e3d730953"
+    },
+    "src/checker.rs": {
+      "git_blob": "c21cb59df40d0b1d1aa7f27e0cf786cb6626701b",
+      "sha256": "2f1061f18bee083e8b976377d77822e3601a888f3321d22c167b750914c6f5d7"
+    },
+    "src/convert.rs": {
+      "git_blob": "dcfdad7eace495c659fa5080ea14b41da7fc9c76",
+      "sha256": "6e37e309e0292a602b8fb6ab824c6b7af3ed5c608c6fc24f91dc6ee1137aa1ad"
+    },
+    "src/diagnostics.rs": {
+      "git_blob": "f090cf597ba2a96134a08ec8d98233751e238b87",
+      "sha256": "2d94c257aa27566aaa6dbdd45a9b5f7beed41e4eda054176b026116c6cfedfdc"
+    },
+    "src/environment.rs": {
+      "git_blob": "0ccc6763dee82123112aa3f2ef9d92a66bcc31db",
+      "sha256": "05fc0f51a7715f1efb81d8642761132639f348fb68a979036d6493c528cde5fd"
+    },
+    "src/id.rs": {
+      "git_blob": "a0dc21397aa67e592e5a388cb475f845ac4393cd",
+      "sha256": "79f7d6e2c32b0f50a391d197e4eee32dc0bf9bc4ec96d27a1e31eed833dd215b"
+    },
+    "src/indexed_prop.rs": {
+      "git_blob": "c04710139f32f7fac83d1a9216ca906cd10682a9",
+      "sha256": "ab9f35c77c8c285e12f60bca2b50d40faa8ae1673e1a6bfb300f00e1fd683e76"
+    },
+    "src/inductive.rs": {
+      "git_blob": "95dce73d54f2c223a0ca1d327169d93d569a6fa1",
+      "sha256": "f8111184a6c4a37ebfa362679d4c79d2a9f3297c41fd524cc45b71ca7b39e1dd"
+    },
+    "src/judgment.rs": {
+      "git_blob": "4a3f8cf452e57c92ba11504e8e257ffff068c8c6",
+      "sha256": "41714ffe0ba04ae42a1329f0a083f632eec6ae3102d1cc9e0c7ab3ca8c082f6d"
+    },
+    "src/level.rs": {
+      "git_blob": "1514a3a6a246a76d7309f3fc27d28d6f79c3c14e",
+      "sha256": "9ba7db039f7793f9cd794d6a2a9e30d92313c093d6b4506fd6db1449a002aef5"
+    },
+    "src/lib.rs": {
+      "git_blob": "c4c665849c1acde79fcb0c92e4762c29536270ed",
+      "sha256": "bfdcc671a13ea04c978ab7f4e7dfd8a5635ccda61880580d667b0357772127f6"
+    },
+    "src/machine.rs": {
+      "git_blob": "c7cf7e476a11436d7555c09db2b6a192b876ec15",
+      "sha256": "231b03fd39ed984a229a31e154fad94a63e5d6f6a83826933ea5eeee163ad8e0"
+    },
+    "src/main.rs": {
+      "git_blob": "68162be0954848e163f3ab672c822ff5c386e5e3",
+      "sha256": "f91aff65ae0397b5a99cd657260d6ba6097af201dbf7d31d5baca8e17d51f565"
+    },
+    "src/nat.rs": {
+      "git_blob": "493c28305a6043ae78749aa17245d17ea9fb9259",
+      "sha256": "b1767ff422548733e756056e2470771bfa9eed2bcbb71082e8d494cfa1869b88"
+    },
+    "src/parser.rs": {
+      "git_blob": "ec0664842fa056ab87a7bc08a6b513a854fb4968",
+      "sha256": "f2ed7bb33224fc536282d6e83e5d6fbdbc62713c23a1da9a7a66fa11ad9d0335"
+    },
+    "src/renovation.rs": {
+      "git_blob": "bb03e8d91388823d8d1881d44fb0185cc1a08090",
+      "sha256": "65da76bea5db16cb680b8206e43f245e3bf2030b3858450b3604364aa495cfe6"
+    },
+    "src/renovation/nullary.rs": {
+      "git_blob": "23a5c94d9281eecec228dd212e88dbf6e393e12f",
+      "sha256": "4319377b88fa2d34acaa943b5c10146428b3275dc632a6564f760be21245915c"
+    },
+    "src/renovation/nullary/composite.rs": {
+      "git_blob": "c542c9a1a9aa3a1a1123ede1dc3130d486ced84f",
+      "sha256": "7390801a5d8ed4855de853b08395472ecf019aeecb62d4de17cc678797c20324"
+    },
+    "src/renovation/nullary/parametric.rs": {
+      "git_blob": "f8d0e89f1e5efd6b853ea579e5c8324fa94eca4f",
+      "sha256": "a998f311feb8ab2343045c051da24b70bf58e6673a5f5eda90578657c1488a36"
+    },
+    "src/renovation/nullary/parametric/projection.rs": {
+      "git_blob": "b02e1b25b5606834b35f37cf910e84c85233cd7b",
+      "sha256": "ec18bea32789732500427ff21c5511e035c15006397f0f5757fddf706131318b"
+    },
+    "src/renovation/unique_json.rs": {
+      "git_blob": "baab1df557e4a5db441f730cbceb7b1067fe3ebf",
+      "sha256": "725ea98cbf44fec2821fe2dd305d563b401f5bf2e0a9af6de69f30fa4c8d2f7b"
+    },
+    "src/syntax.rs": {
+      "git_blob": "9fd875b3db4aa5f9e1ffa684781777be2ba92e91",
+      "sha256": "6ba86a3b6820d9739f8cb5ad1ede3906f456cf2a16119d712a85795cda376116"
+    },
+    "src/typecheck.rs": {
+      "git_blob": "d3e16e10391c7c6924a9e7251c3006797513864e",
+      "sha256": "cce99480799e9147bdc976933cc23c3c57e15f64918b906120c223f7df1e382b"
+    },
+    "src/value.rs": {
+      "git_blob": "1d70c62a9734f9d2bc581ad8b454f62358623244",
+      "sha256": "cb9629b77dd823870594923b07a000f2f363014486c0ec4bcec60387fde0aef1"
+    },
+    "src/verdict.rs": {
+      "git_blob": "b7068fd72566be773e5175dea105811754bdb4e4",
+      "sha256": "e2154540cb78dee760db6800999d6d134bec90ae6c03a0a1bd297efb0eb5885c"
+    }
+  },
+  "rust_tests": {
+    "ignored": 17,
+    "passed": 371
+  },
+  "source_base_commit": "61baa9e54a0b5b28bc41e5f81dcb50c0273f8e03",
+  "status": "WARRANTED_BOUNDED"
+}

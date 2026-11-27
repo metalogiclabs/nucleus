@@ -5752,6 +5752,77 @@ impl<'a> TypeChecker<'a> {
         )
     }
 
+    /// Open exactly the missing major of a certified partial K recursor.
+    /// Both functions' actual dependent arguments and complete types must be
+    /// checked before the fresh local is introduced. Merely knowing the
+    /// recursor's expected telescope cannot type an arbitrary captured minor.
+    pub(crate) fn partial_rule_k_eta_pair(
+        &self,
+        source: &Neutral,
+        other: &Neutral,
+        context: &[TypeValue],
+        budget: usize,
+    ) -> Option<(Closure, Closure, Vec<TypeValue>)> {
+        if budget < 256 || context.len() >= 24 || other.spine.len() > 16 {
+            return None;
+        }
+        let NeutralHead::Const { name, .. } = &source.head else { return None };
+        let reduction = self.environment.recursor_reduction(*name)?;
+        let [rule] = reduction.rules.as_slice() else { return None };
+        let major = reduction.num_params.checked_add(1)?
+            .checked_add(reduction.rules.len())?.checked_add(reduction.num_indices)?;
+        if !reduction.k || rule.num_fields != 0 || source.spine.len() != major {
+            return None;
+        }
+        let allowance = budget / 4;
+        let checked_type = |neutral: &Neutral| -> Option<TypeValue> {
+            let mut prefix = Neutral { head: neutral.head.clone(), spine: Vec::new() };
+            let mut fuel = allowance;
+            for argument in &neutral.spine {
+                let function = self.neutral_result_type(&prefix, context, fuel)?;
+                let (domain, _) = self.pi_view(
+                    Judgment::proven(function, "partial-k-checked-prefix"), fuel,
+                )?;
+                let actual = self.infer_exact_closure_in_context(argument, context, &mut fuel, 0)?;
+                if !crate::convert::convert_with_policy_in_context(
+                    self, &actual, &domain, fuel.min(allowance), self.delta_policy,
+                    context.len(), context,
+                ).is_proven() { return None; }
+                prefix.spine.push(argument.clone());
+            }
+            self.neutral_result_type(&prefix, context, fuel)
+        };
+        let source_type = checked_type(source)?;
+        let other_type = checked_type(other)?;
+        if !crate::convert::convert_with_policy_in_context(
+            self, &source_type, &other_type, allowance, self.delta_policy,
+            context.len(), context,
+        ).is_proven() { return None; }
+        let (domain, _) = self.pi_view(
+            Judgment::proven(source_type, "partial-k-function-type"), allowance,
+        )?;
+        let fresh = fresh_local(context.len())?;
+        // A captured local with this identity must never be rebound by eta.
+        if self.type_depends_on_free(&domain, fresh, allowance) != Some(false)
+            || source.spine.iter().chain(&other.spine).any(|argument|
+                self.type_depends_on_free(&TypeValue::Term(argument.clone()), fresh, allowance) != Some(false))
+        { return None; }
+        let carrier = self.expressions.iter_raw().find_map(|(id, expression)|
+            matches!(expression, Expr::BVar(0)).then_some(ExprId(id)))?;
+        let argument = Closure::new(carrier, EnvFrame::empty().extend_free(fresh));
+        let mut body_context = context.to_vec();
+        body_context.push(domain);
+        let mut applied_source = source.clone();
+        applied_source.spine.push(argument.clone());
+        let RuleKAttempt::Reduced(reduced) = self.rule_k_reduce_neutral(
+            &applied_source, &body_context, allowance,
+        ) else { return None };
+        let mut applied_other = other.clone();
+        applied_other.spine.push(argument);
+        let rhs = Closure::new(carrier, EnvFrame::empty().extend_neutral(applied_other));
+        Some((reduced, rhs, body_context))
+    }
+
     pub(crate) fn rule_k_reduce_neutral(
         &self,
         neutral: &Neutral,
