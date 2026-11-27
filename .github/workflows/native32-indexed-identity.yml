@@ -1,0 +1,261 @@
+name: Native 3.2 indexed identity reconstruction
+on:
+  push:
+    branches: [research/native32-indexed-identity-20261127]
+    paths: ['.github/workflows/native32-indexed-identity.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Restore pinned runtime and immutable qualification inputs
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          git merge-base --is-ancestor a2ccc2bd124e74e2c6d270a16cc17e7cbabd9658 HEAD
+          git diff --exit-code a2ccc2bd124e74e2c6d270a16cc17e7cbabd9658 HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          test "$(git rev-parse HEAD:src)" = b054f118067af2a4f5c3113ff81bc9d987bba88f
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15173687615/zip > evidence-run/base.zip
+          printf '%s  %s\n' 904f723417fae29ee959e89d335bfa9c93934fc38f5846013c09a4cdfa99ce61 evidence-run/base.zip | sha256sum -c -
+      - name: Reconstruct indexed identity family from its full source telescope
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation/nullary/parametric.rs')
+          s=p.read_text()
+          def once(a,b):
+              global s
+              assert s.count(a)==1,(a,s.count(a))
+              s=s.replace(a,b)
+          # This certificate is intentionally shape-derived, bounded, and
+          # opaque. Even though the exported K bit is checked, no executable
+          # K or indexed iota authority is installed by this experiment.
+          new=r'''// Exact indexed identity family: (A : Sort u) (a : A) (b : A)
+          // -> Prop; sole constructor returns identity at (a,a). Derive
+          // every binder and recursor rule from that source shape, not a
+          // declaration name or a stored K bit. Conservative names/flags
+          // constrain the first fragment; they never suffice for admission.
+          fn checked_identity(t:&Tables,b:&Value)->Option<CertifiedFamily>{
+              use crate::id::{ExprId,NameId};
+              use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
+              let mut fuel=Budget(100_000);
+              need(keys(b,&["types","ctors","recs"]))?;
+              let [ind]=arr(b,"types")? else{return None};
+              let [ctor]=arr(b,"ctors")? else{return None};
+              let [rec]=arr(b,"recs")? else{return None};
+              need(keys(ind,&["all","ctors","hasEta","hasLargeElim","hasProjections","isImpredicative",
+                  "isK","isRec","isUnsafe","levelParams","name","numIndices","numNested","numParams","type"]))?;
+              need(keys(ctor,&["cidx","induct","isUnsafe","levelParams","name","numFields","numParams","type"]))?;
+              need(keys(rec,&["all","isUnsafe","k","levelParams","name","numIndices","numMinors",
+                  "numMotives","numParams","rules","type"]))?;
+              let i=num(ind,"name")?;let c=num(ctor,"name")?;let r=num(rec,"name")?;
+              need(t.valid_name(i)&&t.valid_name(c)&&t.valid_name(r)&&
+                  HashSet::from([i,c,r]).len()==3&&t.name(c,i,"refl")&&t.name(r,i,"rec"))?;
+              let ps=numbers(ind,"levelParams")?;
+              let [u]=ps.as_slice() else{return None};
+              need(t.valid_name(*u)&&numbers(ind,"all")?==[i]&&numbers(ind,"ctors")?==[c])?;
+              need(num(ind,"numParams")?==2&&num(ind,"numIndices")?==1&&num(ind,"numNested")?==0&&
+                  !boolean(ind,"isRec")?&&!boolean(ind,"isUnsafe")?)?;
+              let f=Features::read(ind).ok()?;
+              need(!f.imp&&f.large&&f.k&&!f.eta&&!f.projections)?;
+              need(num(ctor,"cidx")?==0&&num(ctor,"induct")?==i&&
+                  num(ctor,"numParams")?==2&&num(ctor,"numFields")?==0&&
+                  !boolean(ctor,"isUnsafe")?&&numbers(ctor,"levelParams")?==ps)?;
+              need(numbers(rec,"all")?==[i]&&!boolean(rec,"isUnsafe")?&&boolean(rec,"k")?&&
+                  num(rec,"numParams")?==2&&num(rec,"numIndices")?==1&&
+                  num(rec,"numMotives")?==1&&num(rec,"numMinors")?==1)?;
+              let rps=numbers(rec,"levelParams")?;
+              let [v,ru]=rps.as_slice() else{return None};
+              need(*ru==*u&&*v!=*u&&t.valid_name(*v)&&fresh_motive(t,&ps,*v))?;
+              let levels=[param(*u)];
+              let eq=|a:usize,x:usize,y:usize|apps(constant(i,&levels),[var(a),var(x),var(y)]);
+              let refl=|a:usize,x:usize|apps(constant(c,&levels),[var(a),var(x)]);
+              let alpha=sort(param(*u));
+              let ty=wrap(&[alpha.clone(),var(0),var(1)],sort(zero()),false);
+              let ctor_ty=wrap(&[alpha.clone(),var(0)],eq(1,0,0),false);
+              let motive=pi(var(1),pi(eq(2,1,0),sort(param(*v))));
+              let minor=apps(var(0),[var(1),refl(2,1)]);
+              let common=[alpha,var(0),motive,minor];
+              let rec_ty=wrap(&common,pi(var(3),pi(eq(4,3,0),apps(var(3),[var(1),var(0)]))),false);
+              let rhs=wrap(&common,var(0),true);
+              need(from_expr(t,num(ind,"type")?,&mut fuel,0)?==ty)?;
+              need(from_expr(t,num(ctor,"type")?,&mut fuel,0)?==ctor_ty)?;
+              need(from_expr(t,num(rec,"type")?,&mut fuel,0)?==rec_ty)?;
+              let [rule]=arr(rec,"rules")? else{return None};
+              need(keys(rule,&["ctor","nfields","rhs"])&&num(rule,"ctor")?==c&&num(rule,"nfields")?==0)?;
+              need(from_expr(t,num(rule,"rhs")?,&mut fuel,0)?==rhs)?;
+              let signature=|row:&Value,kind|->Option<DerivedSignature>{
+                  Some(DerivedSignature{kind,name:NameId(u64::try_from(num(row,"name")?).ok()?),
+                      level_params:numbers(row,"levelParams")?.into_iter().map(|n|u64::try_from(n).ok().map(NameId)).collect::<Option<Vec<_>>>()?,
+                      ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
+              };
+              // Do not install a reduction certificate. This experiment
+              // tests only the checked opaque indexed signatures.
+              Some(CertifiedFamily{signatures:vec![
+                  signature(ind,OpaqueInductiveKind::Type)?,
+                  signature(ctor,OpaqueInductiveKind::Constructor)?,
+                  signature(rec,OpaqueInductiveKind::Recursor)?],reduction:None})
+          }
+
+          '''
+          once('impl PriorFamilies {',new+'impl PriorFamilies {')
+          once('        let f=checked_family_with_prior(t,b,&self.0)?;',
+               '        if let Some(identity)=checked_identity(t,b){return Some(identity);}\n        let f=checked_family_with_prior(t,b,&self.0)?;')
+          p.write_text(s)
+          PY
+          git diff --exit-code -- . ':!src/renovation/nullary/parametric.rs'
+          git diff -- src > evidence-run/indexed-identity.patch
+          git add src
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          python3 scripts/test.py
+          python3 -m unittest discover -s tests_py
+          cargo build --locked --release --features diagnostics
+          sha256sum target/release/metatron-kernel arena.py arena-flags.json > evidence-run/binary.sha256
+      - name: Test actual indexed equality and computation witnesses plus countercontrols
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,copy,hashlib,io,json,pathlib,subprocess,tarfile,zipfile
+          p=pathlib.Path('evidence-run')
+          z=zipfile.ZipFile(p/'base.zip');assert len(z.namelist())==31 and z.testzip() is None
+          c=zipfile.ZipFile(io.BytesIO(z.read('composition.zip')));assert c.testzip() is None
+          b=zipfile.ZipFile(io.BytesIO(c.read('base.zip')));assert b.testzip() is None
+          def inputs(blob):
+              zz=zipfile.ZipFile(io.BytesIO(blob));assert zz.testzip() is None
+              t=tarfile.open(fileobj=io.BytesIO(zz.read('lean-arena-tests.tar.gz')))
+              return {m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          current=inputs(b.read('test-tarball.zip'))
+          oldzip=zipfile.ZipFile(io.BytesIO(b.read('prior-qualification.zip')));assert oldzip.testzip() is None
+          old=inputs(oldzip.read('tarball.zip'))
+          def run(raw):
+              q=subprocess.run(['python3','arena.py'],input=raw,capture_output=True,timeout=120)
+              return q.returncode,q.stderr.decode(errors='replace')
+          def digest(raw):return hashlib.sha256(raw).hexdigest()
+          def serialize(rows):return b''.join(json.dumps(r,separators=(',',':')).encode()+b'\n' for r in rows)
+          baseline={r['name']:r for r in json.loads(z.read('current-rows.json'))}
+          targets=['tutorial/043_eqType','tutorial/069_eqRec','tutorial/078_boolRecEqns','tutorial/079_prodRecEqns']
+          witnesses=[]
+          for name in targets:
+              raw=current[name];a=baseline[name];assert digest(raw)==a['sha256'] and a['exit']==2 and a['expected']=='accept'
+              code,err=run(raw);row={'name':name,'sha256':digest(raw),'before':a['exit'],'exit':code,'stderr':err}
+              witnesses.append(row);print('WITNESS '+json.dumps(row),flush=True)
+          (p/'witnesses.json').write_text(json.dumps(witnesses,indent=2)+'\n')
+          # Corrupt the actual Eq block while preserving the native header.
+          rows=[json.loads(l) for l in current[targets[0]].splitlines()]
+          at=next(i for i,r in enumerate(rows) if 'inductive' in r)
+          def mutate(f):
+              a=copy.deepcopy(rows);f(a[at]['inductive']);return serialize(a)
+          mutations=[
+            ('missing-rule',lambda b:b['recs'][0]['rules'].clear()),
+            ('forged-rule',lambda b:b['recs'][0]['rules'][0].update(rhs=b['ctors'][0]['type'])),
+            ('forged-recursor-type',lambda b:b['recs'][0].update(type=b['types'][0]['type'])),
+            ('forged-constructor-result',lambda b:b['ctors'][0].update(type=b['types'][0]['type'])),
+            ('wrong-owner',lambda b:b['ctors'][0].update(induct=b['recs'][0]['name'])),
+            ('wrong-index-count',lambda b:b['types'][0].update(numIndices=0)),
+            ('fake-projection',lambda b:b['types'][0].update(hasProjections=True)),
+            ('false-k-agreement',lambda b:b['recs'][0].update(k=False)),
+          ]
+          controls=[];d=p/'controls';d.mkdir()
+          for name,f in mutations:
+              raw=mutate(f);code,err=run(raw);(d/(name+'.ndjson')).write_bytes(raw)
+              controls.append({'name':name,'sha256':digest(raw),'exit':code,'stderr':err})
+          # A direct equality pair using precisely the certified Bool/Eq
+          # declarations from the authentic boolRecEqns export. This does not
+          # change any exporter metadata or any source inductive declaration.
+          rr=[json.loads(l) for l in current[targets[2]].splitlines()]
+          names={0:''}
+          for r in rr:
+              if 'in' in r:
+                  q=r.get('str',r.get('num'));names[r['in']]=names[q['pre']]+('.' if q['pre'] else '')+str(q.get('str',q.get('i')))
+          reverse={v:k for k,v in names.items()}
+          # The ordinary final theorem is removed; the exact dependency blocks
+          # and existing tables are retained. Build a fresh closed equality
+          # theorem with proof refl false, then change only the right index.
+          assert 'thm' in rr[-1]
+          rr=rr[:-1]
+          idx=max(r['ie'] for r in rr if 'ie' in r)+1
+          nid=max(names)+1
+          rr.append({'in':nid,'str':{'pre':0,'str':'nativeIdentityGate'}})
+          one=next(r['il'] for r in rr if r.get('succ')==0 and 'il' in r)
+          def exp(tag,value):
+              global idx
+              i=idx;idx+=1;rr.append({'ie':i,tag:value});return i
+          def con(n,us):return exp('const',{'name':reverse[n],'us':us})
+          def app(f,a):return exp('app',{'fn':f,'arg':a})
+          bool_t=con('Bool',[]);f=con('Bool.false',[]);t=con('Bool.true',[])
+          eq=con('Eq',[one]);eqf=app(app(eq,bool_t),f)
+          proof=app(app(con('Eq.refl',[one]),bool_t),f)
+          good_ty=app(eqf,f);bad_ty=app(eqf,t)
+          for name,ty,expected in [('identity-true',good_ty,0),('identity-false',bad_ty,1)]:
+              raw=serialize(rr+[{'thm':{'all':[nid],'name':nid,'levelParams':[],'type':ty,'value':proof}}])
+              code,err=run(raw);(d/(name+'.ndjson')).write_bytes(raw)
+              controls.append({'name':name,'sha256':digest(raw),'exit':code,'expected':expected,'stderr':err})
+          (p/'controls.json').write_text(json.dumps(controls,indent=2)+'\n')
+          print('CONTROLS '+json.dumps(controls),flush=True)
+          # Keep both exact cohorts and all 12 prior native computation
+          # controls; never use changed input names as runtime authority.
+          for cohort,ins in [('current',current),('prior',old)]:
+              before={r['name']:r for r in json.loads(z.read(cohort+'-rows.json'))}
+              assert len(ins)==356 and set(ins)==set(before)
+              result=[]
+              for n,raw in ins.items():
+                  r=before[n];assert digest(raw)==r['sha256'],n
+                  code,err=run(raw);result.append({'name':n,'sha256':digest(raw),'format':r['format'],'expected':r['expected'],'before':r['exit'],'exit':code,'stderr':err})
+              changes=[r for r in result if r['before']!=r['exit']]
+              summary={'cohort':cohort,'counts':dict(collections.Counter(r['exit'] for r in result)),'changed':changes,'input_count':len(result)}
+              (p/(cohort+'-rows.json')).write_text(json.dumps(result,indent=2)+'\n')
+              (p/(cohort+'-summary.json')).write_text(json.dumps(summary,indent=2)+'\n')
+              print('SUMMARY '+json.dumps(summary),flush=True)
+          native=[]
+          for row in json.loads(z.read('native-ab.json')):
+              raw=z.read('native/'+row['name']+'.ndjson');assert digest(raw)==row['sha256']
+              code,err=run(raw);native.append({'name':row['name'],'before':row['after'],'exit':code,'sha256':digest(raw),'stderr':err})
+          for row in json.loads(z.read('iota-controls.json')):
+              raw=z.read('native/mut-'+row['name']+'.ndjson');assert digest(raw)==row['sha256']
+              code,err=run(raw);native.append({'name':row['name'],'before':row['exit'],'exit':code,'sha256':digest(raw),'stderr':err})
+          (p/'native-preserved.json').write_text(json.dumps(native,indent=2)+'\n')
+          external=[]
+          for row in json.loads(b.read('new-regressions.json')):
+              raw=b.read('new-inputs/'+row['case']);assert digest(raw)==row['sha256']
+              code,err=run(raw);external.append({'name':row['case'],'before':row['exit'],'exit':code,'sha256':digest(raw),'stderr':err})
+          (p/'external.json').write_text(json.dumps(external,indent=2)+'\n')
+          PY
+      - name: Enforce actual gains and preserve warranted decisions
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('evidence-run')
+          for cohort in ('current','prior'):
+              s=json.loads((p/(cohort+'-summary.json')).read_text());assert s['input_count']==356
+              assert all(r['format']=='3.2.0' and r['before']==2 and r['expected']=='accept' and r['exit']==0 for r in s['changed']),s
+          controls=json.loads((p/'controls.json').read_text());assert len(controls)==10
+          assert all(r['exit']==0 if r['name']=='identity-true' else r['exit'] in (1,2) for r in controls),controls
+          for file,count in [('native-preserved.json',12),('external.json',4)]:
+              rows=json.loads((p/file).read_text());assert len(rows)==count and all(r['before']==r['exit'] for r in rows),rows
+          w=json.loads((p/'witnesses.json').read_text());assert len(w)==4 and all(r['exit']==0 for r in w),w
+          print('QUALIFIED_INDEXED_IDENTITY '+json.dumps({'witnesses':w,'controls':controls}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-indexed-identity
+          path: evidence-run/
+          retention-days: 60
