@@ -15,6 +15,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.99.1'
@@ -23,7 +25,8 @@ jobs:
           set -euo pipefail
           mkdir -p evidence-run
           git rev-parse HEAD > evidence-run/harness.txt
-          test "$(git rev-parse HEAD^)" = b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d
+          git merge-base --is-ancestor b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d HEAD
+          git diff --exit-code b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
           python3 scripts/verify_source_import.py
           python3 - <<'PY'
           from pathlib import Path
