@@ -184,3 +184,36 @@ neutral singleton structure eta and recursive inductives remain unresolved.
 The [retained artifact 15185455830](https://github.com/metalogiclabs/nucleus/actions/runs/45970879447/artifacts/15185455830)
 was independently SHA-256 and CRC verified (22 entries); its 25 source files
 reconstruct source tree `1f0d18bf3ca366d357f76f72290916ee85d0617a`.
+
+## Closed direct unary recursion (2026-11-27)
+
+[Qualification 45973517526](https://github.com/metalogiclabs/nucleus/actions/runs/45973517526)
+extends exact PR #5 source `10f34730`. The certificate reconstructs a
+closed family `I : Type`, constructors `zero : I` and `succ : I → I`,
+the complete dependent recursor telescope and both computation rules.
+The successor rule must pass the induction hypothesis obtained by the
+actual recursive call on its predecessor to the actual step minor.
+All feature flags, owners, levels and constructor-field counts are checked.
+
+The authentic `044_natDef`, `070_nRec` and `080_nRecReduction` now ACCEPT.
+The current cohort gains ten correct native ACCEPTs: 104 ACCEPT,
+51 REJECT, 201 UNKNOWN. The earlier overlapping cohort gains one:
+65 / 51 / 240. No earlier decisive verdict changes or incorrect new
+verdicts were observed across the 712 exact inputs.
+
+Rust: 374 passed, 17 ignored; Python: 27 passed. All three original
+Arena positives and four corrupted-rule controls were checked against
+the pinned native Lean kernel. Erased or swapped induction hypotheses,
+a recursive call on the wrong predecessor and a forged base rule all
+remain UNKNOWN in Nucleus. All 40 earlier computation, identity, K and
+external controls retain their exact verdicts.
+
+The [new chained manifest](../evidence/native32-unary-recursion-qualification-20261127.json)
+binds the runtime and preserves all parent manifests. Named Nat
+literal/primitive authority, polymorphic List recursion, nested/mutual
+families, neutral structure eta and whole-Mathlib acceptance remain
+outside this result. False Boolean equality still returns UNKNOWN.
+
+[Artifact 15186501160](https://github.com/metalogiclabs/nucleus/actions/runs/45973517526/artifacts/15186501160)
+was independently SHA-256 and CRC verified (22 entries). Its 25 source
+files reconstruct source tree `2a3a066c4232b1edf733585e68f1c09221651324`.

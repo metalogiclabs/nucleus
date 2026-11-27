@@ -1,4 +1,5 @@
-//! Source-derived nonrecursive, nonindexed, single-family admission.
+//! Source-derived bounded admission: nonrecursive families, indexed identity,
+//! and the closed direct unary recursive family reconstructed below.
 //! Validate parameter/field dependent typing in the Sort/Pi/Var/App fragment;
 //! no arbitrary constants or axioms in binder types. Derive every constructor
 //! result, motive/minor/major telescope, and applicable iota rule from source.
@@ -382,11 +383,88 @@ fn checked_identity(t:&Tables,b:&Value)->Option<CertifiedFamily>{
         reduction:Some((name(r)?,reduction))})
 }
 
+// Closed direct unary recursion: I : Type, zero : I, succ : I -> I.
+// Reconstruct the dependent induction telescope and the recursive call in
+// the step RHS. An exported recursive flag or a plausible step type alone
+// never authorizes an induction hypothesis or executable reduction.
+fn checked_unary_recursion(t:&Tables,b:&Value)->Option<(CertifiedFamily,usize,T)>{
+    use crate::id::{ExprId,NameId};
+    use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
+    use crate::machine::{RecursorReduction,RecursorRule};
+    let mut fuel=Budget(100_000);
+    need(keys(b,&["types","ctors","recs"]))?;
+    let [ind]=arr(b,"types")? else{return None};
+    let [base,step]=arr(b,"ctors")? else{return None};
+    let [rec]=arr(b,"recs")? else{return None};
+    need(keys(ind,&["all","ctors","hasEta","hasLargeElim","hasProjections","isImpredicative",
+        "isK","isRec","isUnsafe","levelParams","name","numIndices","numNested","numParams","type"]))?;
+    need(keys(rec,&["all","isUnsafe","k","levelParams","name","numIndices","numMinors",
+        "numMotives","numParams","rules","type"]))?;
+    let i=num(ind,"name")?;let z=num(base,"name")?;let s=num(step,"name")?;let r=num(rec,"name")?;
+    need(HashSet::from([i,z,s,r]).len()==4&&[i,z,s,r].iter().all(|&n|t.valid_name(n))&&t.name(r,i,"rec"))?;
+    need(numbers(ind,"all")?==[i]&&numbers(ind,"ctors")?==[z,s]&&numbers(ind,"levelParams")?.is_empty())?;
+    need(num(ind,"numParams")?==0&&num(ind,"numIndices")?==0&&num(ind,"numNested")?==0&&
+        boolean(ind,"isRec")?&&!boolean(ind,"isUnsafe")?)?;
+    let f=Features::read(ind).ok()?;
+    need(f.large&&!f.imp&&!f.k&&!f.projections&&!f.eta)?;
+    for (j,c) in [base,step].into_iter().enumerate(){
+        need(keys(c,&["cidx","induct","isUnsafe","levelParams","name","numFields","numParams","type"]))?;
+        need(num(c,"induct")?==i&&num(c,"cidx")?==j&&num(c,"numParams")?==0&&
+            num(c,"numFields")?==j&&!boolean(c,"isUnsafe")?&&numbers(c,"levelParams")?.is_empty())?;
+    }
+    need(numbers(rec,"all")?==[i]&&!boolean(rec,"isUnsafe")?&&!boolean(rec,"k")?&&
+        num(rec,"numParams")?==0&&num(rec,"numIndices")?==0&&num(rec,"numMotives")?==1&&num(rec,"numMinors")?==2)?;
+    let ps=numbers(rec,"levelParams")?;
+    let [u]=ps.as_slice() else{return None};
+    need(t.valid_name(*u)&&fresh_motive(t,&[],*u))?;
+    let ind_ty=sort(succ(zero()));
+    let node=constant(i,&[]);let base_node=constant(z,&[]);let step_node=constant(s,&[]);
+    need(from_expr(t,num(ind,"type")?,&mut fuel,0)?==ind_ty)?;
+    need(from_expr(t,num(base,"type")?,&mut fuel,0)?==node)?;
+    need(from_expr(t,num(step,"type")?,&mut fuel,0)?==pi(node.clone(),node.clone()))?;
+    let motive=pi(node.clone(),sort(param(*u)));
+    let minor_base=app(var(0),base_node);
+    let minor_step=pi(node.clone(),pi(app(var(2),var(0)),app(var(3),app(step_node,var(1)))));
+    let common=[motive,minor_base,minor_step];
+    let rec_ty=wrap(&common,pi(node.clone(),app(var(3),var(0))),false);
+    need(from_expr(t,num(rec,"type")?,&mut fuel,0)?==rec_ty)?;
+    let base_rhs=wrap(&common,var(1),true);
+    let recursive_call=apps(constant(r,&[param(*u)]),[var(3),var(2),var(1),var(0)]);
+    let mut step_binders=common.to_vec();step_binders.push(node);
+    let step_rhs=wrap(&step_binders,apps(var(1),[var(0),recursive_call]),true);
+    let rules=arr(rec,"rules")?;need(rules.len()==2)?;
+    for (j,(rule,rhs)) in rules.iter().zip([base_rhs,step_rhs]).enumerate(){
+        need(keys(rule,&["ctor","nfields","rhs"])&&num(rule,"ctor")?==[z,s][j]&&num(rule,"nfields")?==j)?;
+        need(from_expr(t,num(rule,"rhs")?,&mut fuel,0)?==rhs)?;
+    }
+    let name=|n:usize|u64::try_from(n).ok().map(NameId);
+    let signature=|row:&Value,kind|->Option<DerivedSignature>{
+        Some(DerivedSignature{kind,name:name(num(row,"name")?)?,
+            level_params:numbers(row,"levelParams")?.into_iter().map(name).collect::<Option<Vec<_>>>()?,
+            ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
+    };
+    let mut checked_rules=Vec::new();
+    for (j,rule) in rules.iter().enumerate(){
+        checked_rules.push(RecursorRule{constructor:name([z,s][j])?,constructor_level_params:Vec::new(),
+            num_params:0,num_fields:j,rhs:ExprId(u64::try_from(num(rule,"rhs")?).ok()?)})
+    }
+    Some((CertifiedFamily{signatures:vec![signature(ind,OpaqueInductiveKind::Type)?,
+        signature(base,OpaqueInductiveKind::Constructor)?,signature(step,OpaqueInductiveKind::Constructor)?,
+        signature(rec,OpaqueInductiveKind::Recursor)?],reduction:Some((name(r)?,RecursorReduction{
+            k:false,num_params:0,num_indices:0,level_params:ps.into_iter().map(name).collect::<Option<Vec<_>>>()?,
+            rules:checked_rules,
+        }))},i,ind_ty))
+}
+
 impl PriorFamilies {
     pub(super) fn certify(&mut self,t:&Tables,b:&Value)->Option<CertifiedFamily> {
         use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
         use crate::id::{ExprId,NameId};
         if let Some(identity)=checked_identity(t,b){return Some(identity);}
+        if let Some((recursive,name,ty))=checked_unary_recursion(t,b){
+            need(self.0.insert(name,ty).is_none())?;
+            return Some(recursive);
+        }
         let f=checked_family_with_prior(t,b,&self.0)?;
         let signature=|row:&Value,kind|->Option<DerivedSignature>{
             Some(DerivedSignature{kind,name:NameId(u64::try_from(num(row,"name")?).ok()?),
