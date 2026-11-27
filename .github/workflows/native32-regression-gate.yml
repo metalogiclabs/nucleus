@@ -1,7 +1,7 @@
-name: Nucleus native 3.2 ordinary core and expression order qualification
+name: Nucleus complete ordinary native migration and protected regression gate
 on:
   push:
-    branches: [research/native32-ordinary-core-20261127]
+    branches: [research/native32-ordinary-completion-20261127]
     paths: ['.github/workflows/native32-regression-gate.yml']
   workflow_dispatch:
 permissions:
@@ -228,7 +228,57 @@ jobs:
                           Verdict::Accept
                       }''')])
           PY
-          git diff --exit-code -- . ':!src/renovation.rs' ':!src/renovation/nullary.rs' ':!src/parser.rs' ':!src/lib.rs'
+          python3 - <<'PY'
+          from pathlib import Path
+          def edit(path, changes):
+              p=Path(path);s=p.read_text()
+              for a,b in changes:
+                  assert s.count(a)==1,(path,a,s.count(a))
+                  s=s.replace(a,b)
+              p.write_text(s)
+          # Admit only dependent-form let records with nondep=false. The
+          # complete typed core interprets their source type, value and body.
+          # This extra table constructor is unavailable to earlier admission.
+          edit('src/renovation/nullary.rs',[
+              ('    Proj(usize, usize, usize),','    Proj(usize, usize, usize),\n    OrdinaryLet,'),
+              ('    fn add_projection(&mut self,row:&Value)->Option<()> {',r'''    fn add_ordinary_let(&mut self,row:&Value)->Option<()> {
+                  need(keys(row,&["ie","letE"]))?;
+                  let id=num(row,"ie")?;
+                  let p=row.get("letE")?;
+                  need(keys(p,&["name","type","value","body","nondep"]))?;
+                  need(id==self.exprs.len() && num(p,"name")?<self.names.len() && !boolean(p,"nondep")?)?;
+                  need(num(p,"type")?<id && num(p,"value")?<id && num(p,"body")?<id)?;
+                  self.exprs.push(Expr::OrdinaryLet);
+                  Some(())
+              }
+              fn add_projection(&mut self,row:&Value)->Option<()> {'''),
+              ('    let mut declarations=0usize;\n    for row in rows {','    let mut declarations=0usize;\n    let mut final_axiom=false;\n    for row in rows {\n        if final_axiom {return None;}'),
+              ('        } else {\n            tables.add(row)?;\n            continue;\n        };',r'''        } else if keys(row,&["axiom"]) {
+                      // A final axiom may be refuted as ill-formed. It may
+                      // never authorize acceptance or any subsequent claim.
+                      let a=row.get("axiom")?;
+                      need(keys(a,&["isUnsafe","levelParams","name","type"]))?;
+                      need(!boolean(a,"isUnsafe")? && tables.valid_name(num(a,"name")?))?;
+                      need(numbers(a,"levelParams")?.iter().all(|n|tables.valid_name(*n)))?;
+                      need(num(a,"type")?<tables.exprs.len())?;
+                      final_axiom=true;
+                      declarations+=1;
+                      continue;
+                  } else {
+                      if keys(row,&["ie","letE"]) {tables.add_ordinary_let(row)?;}
+                      else {tables.add(row)?;}
+                      continue;
+                  };'''),
+              ('        Verdict::Accept=>Some(super::Outcome::AcceptOrdinary),','        Verdict::Accept if !final_axiom=>Some(super::Outcome::AcceptOrdinary),\n        Verdict::Accept=>None,')])
+          edit('src/renovation/nullary/parametric.rs',[
+              ('        Expr::Proj(n,i,s)=>Term::Proj(*n,*i,from_expr(t,*s,fuel,depth+1)?),',
+               '        Expr::Proj(n,i,s)=>Term::Proj(*n,*i,from_expr(t,*s,fuel,depth+1)?),\n        Expr::OrdinaryLet=>return None,')])
+          edit('src/parser.rs',[
+              ('            && value.get("thm").is_none() {','            && value.get("thm").is_none() && value.get("axiom").is_none() {'),
+              ('    if export.declarations.is_empty() || export.declarations.iter().any(|d|\n        !matches!(d, Declaration::Definition { .. } | Declaration::Theorem { .. })) {',
+               '    if export.declarations.is_empty() || export.declarations.iter().enumerate().any(|(i,d)|\n        !matches!(d, Declaration::Definition { .. } | Declaration::Theorem { .. })\n        && !(i+1==export.declarations.len() && matches!(d, Declaration::Axiom { .. }))) {')])
+          PY
+          git diff --exit-code -- . ':!src/renovation.rs' ':!src/renovation/nullary.rs' ':!src/renovation/nullary/parametric.rs' ':!src/parser.rs' ':!src/lib.rs'
           git diff -- src > evidence-run/native32-candidate.patch
           git add src
           git write-tree > evidence-run/candidate-tree.txt
@@ -332,7 +382,7 @@ jobs:
               ('missing-type',mutate(lambda x:x[-1]['def'].update(type=100)),2),
               ('extra-field',mutate(lambda x:x[-1]['def'].update(forged=True)),2),
               ('unsupported-literal',mutate(lambda x:x.insert(-1,{'ie':2,'natVal':'0'})),2),
-              ('unsupported-axiom',mutate(lambda x:x.append({'axiom':{'name':1,'levelParams':[],'type':0}})),2),
+              ('valid-final-axiom',mutate(lambda x:x.extend([{'in':2,'str':{'pre':0,'str':'newAxiom'}},{'axiom':{'isUnsafe':False,'name':2,'levelParams':[],'type':0}}])),2),
               ('duplicate-expression',mutate(lambda x:x.insert(-1,dict(x[-2]))),3),
               ('duplicate-json-key',good.replace(b'"name":1,"safety"',b'"name":1,"name":1,"safety"'),3),
               ('forward-const',mutate(lambda x:(x.insert(-1,{'ie':2,'const':{'name':1,'us':[]}}),x[-1]['def'].update(value=2))),None),
@@ -361,6 +411,12 @@ jobs:
           assert len(old_rows)==356
           assert all(r['format']=='3.2.0' and r['old']==2 and r['expected'] in ('accept','reject') and r['new']=={'accept':0,'reject':1}[r['expected']] for r in changes),changes
           print('PRIOR_SUMMARY '+json.dumps({'count':len(old_rows),'changes':changes}),flush=True)
+          current={r['name']:r for r in json.loads((p/'corpus-rows.json').read_text())}
+          restored=[r['name'] for r in old_rows if r['old'] in (0,1) and current[r['name']]['official_previous_exit']==2 and current[r['name']]['exit']==r['old']]
+          lost=[r['name'] for r in old_rows if r['old'] in (0,1) and current[r['name']]['official_previous_exit']==2]
+          print('MIGRATION_RESTORATION '+json.dumps({'restored':restored,'lost':lost,'remaining':sorted(set(lost)-set(restored))}),flush=True)
+          (p/'migration-restoration.json').write_text(json.dumps({'restored':restored,'lost':lost,'remaining':sorted(set(lost)-set(restored))},indent=2)+'\n')
+          assert len(lost)==38 and set(restored)==set(lost), 'Migration is not fully restored'
           PY
       - name: Enforce predeclared regression and native core result
         if: always()
@@ -378,6 +434,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: nucleus-native32-ordinary-core-candidate
+          name: nucleus-native32-ordinary-completion-candidate
           path: evidence-run/
           retention-days: 60
