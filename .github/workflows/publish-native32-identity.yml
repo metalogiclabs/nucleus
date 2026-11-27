@@ -1,0 +1,168 @@
+name: Publish qualified native indexed identity source
+on:
+  push:
+    branches: [research/native32-indexed-identity-20261127]
+    paths: ['.github/workflows/publish-native32-identity.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: a2ccc2bd124e74e2c6d270a16cc17e7cbabd9658
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Restore exact qualified source and evidence
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = a2ccc2bd124e74e2c6d270a16cc17e7cbabd9658
+          test "$(git ls-remote --heads origin refs/heads/research/native32-computation-qualified-20261127 | cut -f1)" = a2ccc2bd124e74e2c6d270a16cc17e7cbabd9658
+          test -z "$(git ls-remote --heads origin refs/heads/research/native32-identity-qualified-20261127)"
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15182470435/zip > "$RUNNER_TEMP/identity.zip"
+          printf '%s  %s\n' 72b3db6e2d59d4025fcfbc8e140b5dfa9d057cb206c4cc6625b4740ee8e2698b "$RUNNER_TEMP/identity.zip" | sha256sum -c -
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,tarfile,zipfile
+          p=pathlib.Path(os.environ['RUNNER_TEMP']); z=zipfile.ZipFile(p/'identity.zip')
+          assert len(z.namelist())==25 and z.testzip() is None
+          assert z.read('harness.txt').decode().strip()=='31f7ad496067db90d5dc8c8ca6c88b94a97ff8b2'
+          assert z.read('candidate-src-tree.txt').decode().strip()=='49ea54e287da5d66c757fac43414dc69634da868'
+          assert hashlib.sha256(z.read('base.zip')).hexdigest()=='904f723417fae29ee959e89d335bfa9c93934fc38f5846013c09a4cdfa99ce61'
+          b=zipfile.ZipFile(io.BytesIO(z.read('base.zip'))); assert b.testzip() is None
+          for cohort,counts,gains in [('current',{0:92,1:51,2:213},10),('prior',{0:63,1:51,2:242},0)]:
+              old={r['name']:r for r in json.loads(b.read(cohort+'-rows.json'))}
+              new={r['name']:r for r in json.loads(z.read(cohort+'-rows.json'))}
+              assert len(old)==len(new)==356 and old.keys()==new.keys()
+              assert all(old[n]['sha256']==r['sha256'] and old[n]['expected']==r['expected'] and old[n]['exit']==r['before'] for n,r in new.items())
+              changes=[r for r in new.values() if r['before']!=r['exit']]
+              assert len(changes)==gains and all(r['before']==2 and r['exit']==0 and r['expected']=='accept' for r in changes)
+              assert collections.Counter(r['exit'] for r in new.values())==counts
+          assert all(r['exit']==0 for r in json.loads(z.read('witnesses.json')))
+          controls=json.loads(z.read('controls.json'))
+          assert len(controls)==10 and collections.Counter(r['exit'] for r in controls)=={0:1,1:3,2:6}
+          for file,count in [('native-preserved.json',12),('external.json',4)]:
+              rows=json.loads(z.read(file));assert len(rows)==count and all(r['before']==r['exit'] for r in rows)
+          (p/'identity.patch').write_bytes(z.read('indexed-identity.patch'))
+          PY
+          git apply --index "$RUNNER_TEMP/identity.patch"
+          test "$(git rev-parse "$(git write-tree):src")" = 49ea54e287da5d66c757fac43414dc69634da868
+          python3 - <<'PY'
+          import hashlib,io,json,os,pathlib,tarfile,textwrap,zipfile
+          root=pathlib.Path('.'); z=zipfile.ZipFile(pathlib.Path(os.environ['RUNNER_TEMP'])/'identity.zip')
+          parent=root/'evidence/native32-computation-qualification-20261127.json'; base=json.loads(parent.read_text())
+          changed='src/renovation/nullary/parametric.rs'
+          def identity(raw):
+              return {'git_blob':hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(),'sha256':hashlib.sha256(raw).hexdigest()}
+          t=tarfile.open(fileobj=io.BytesIO(z.read('candidate-source.tar.gz')))
+          sources={m.name:t.extractfile(m).read() for m in t.getmembers() if m.isfile()}
+          assert set(sources)=={k for k in base['runtime_files'] if k.startswith('src/')}
+          assert all((root/k).read_bytes()==v for k,v in sources.items())
+          runtime={k:identity((root/k).read_bytes()) for k in base['runtime_files']}
+          assert {k for k in runtime if runtime[k]!=base['runtime_files'][k]}=={changed}
+          assert runtime[changed]=={'git_blob':'eed45688de792a0768cdc9661f97d29439638949','sha256':'14eb834caa84e8bad385c4c45362721138291be5687729f2209b0cb8f1aa5bc1'}
+          witnesses=json.loads(z.read('witnesses.json'));controls=json.loads(z.read('controls.json'))
+          manifest={'status':'WARRANTED_BOUNDED','original_commit':base['original_commit'],'original_src_tree':base['original_src_tree'],
+              'parent_manifest_sha256':hashlib.sha256(parent.read_bytes()).hexdigest(),
+              'source_base_commit':'a2ccc2bd124e74e2c6d270a16cc17e7cbabd9658',
+              'qualification_harness':'31f7ad496067db90d5dc8c8ca6c88b94a97ff8b2',
+              'qualification_run':'https://github.com/metalogiclabs/nucleus/actions/runs/45963087833',
+              'qualification_artifact_id':15182470435,'qualification_artifact_sha256':'72b3db6e2d59d4025fcfbc8e140b5dfa9d057cb206c4cc6625b4740ee8e2698b',
+              'qualified_src_tree':'49ea54e287da5d66c757fac43414dc69634da868',
+              'qualified_candidate_tree':'ea8588d3fc83d976e107bc24103c245592b981c1',
+              'qualification_binary_sha256':'017c3ec553b669d607935f6ae978b9590cc5cc4d5fa389dccde3d34057638dee',
+              'changed_runtime_files':[changed],'runtime_files':runtime,
+              'current_corpus':{'0':92,'1':51,'2':213},'prior_corpus':{'0':63,'1':51,'2':242},
+              'witnesses':witnesses,'controls':controls,'gains':json.loads(z.read('current-summary.json'))['changed']}
+          (root/'evidence/native32-identity-qualification-20261127.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          f=root/'scripts/verify_source_import.py';s=f.read_text(); marker='    expected = manifest["runtime_files"]'
+          block='''identity_path = root / "evidence/native32-identity-qualification-20261127.json"
+          if identity_path.exists():
+              previous = manifest
+              if not computation_path.exists():
+                  print("Missing parent computation qualification", file=sys.stderr)
+                  return 1
+              manifest = json.loads(identity_path.read_text())
+              changed = {"src/renovation/nullary/parametric.rs"}
+              if (manifest.get("status") != "WARRANTED_BOUNDED"
+                      or manifest.get("parent_manifest_sha256") != hashlib.sha256(computation_path.read_bytes()).hexdigest()
+                      or set(manifest["runtime_files"]) != set(previous["runtime_files"])
+                      or set(manifest["changed_runtime_files"]) != changed
+                      or {k for k in manifest["runtime_files"] if manifest["runtime_files"][k] != previous["runtime_files"][k]} != changed):
+                  print("Invalid indexed identity qualification lineage", file=sys.stderr)
+                  return 1
+          '''
+          assert s.count(marker)==1
+          f.write_text(s.replace(marker,textwrap.indent(block,'    ')+marker))
+          d=root/'tests/fixtures/native32-identity';d.mkdir()
+          b=zipfile.ZipFile(io.BytesIO(z.read('base.zip')));c=zipfile.ZipFile(io.BytesIO(b.read('composition.zip')));o=zipfile.ZipFile(io.BytesIO(c.read('base.zip')))
+          a=zipfile.ZipFile(io.BytesIO(o.read('test-tarball.zip')))
+          t=tarfile.open(fileobj=io.BytesIO(a.read('lean-arena-tests.tar.gz')))
+          raw={m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          tests=[]
+          for r in witnesses:
+              name=r['name'].rsplit('/',1)[1];data=raw[r['name']]
+              assert hashlib.sha256(data).hexdigest()==r['sha256']
+              (d/(name+'.ndjson')).write_bytes(data);tests.append((name,r['exit']))
+          for r in controls:
+              name=r['name'];data=z.read('controls/'+name+'.ndjson')
+              assert hashlib.sha256(data).hexdigest()==r['sha256']
+              (d/(name+'.ndjson')).write_bytes(data);tests.append((name,r['exit']))
+          (d/'README.md').write_text('''# Indexed identity regression inputs
+          
+          Four unchanged Arena Beta tutorial exports, generated from Lean at
+          cb63311203a44983a2326b83fcb16dbbd5c5130a, Arena commit
+          60654ab87757ee8b07e3a292fc546f18e8131a27 (Apache-2.0).
+          Other files are local mutations or a closed true/false equality pair
+          built from the unchanged native dependency blocks. See qualification
+          45963087833, artifact 15182470435. UNKNOWN is not rejection.
+          ''')
+          old=(root/'tests/native32_iota.rs').read_text()
+          helper=old.split('#[test]',1)[0].replace('native32-iota','native32-identity')
+          cases='\n'.join('    check('+json.dumps(n)+','+str(e)+');' for n,e in tests)
+          (root/'tests/native32_identity.rs').write_text(helper+'#[test]\nfn indexed_identity_native_and_negative_controls() {\n'+cases+'\n}\n')
+          q=root/'docs/QUALIFICATION.md'
+          q.write_text(q.read_text()+'''
+          
+          ## Native indexed identity reconstruction (2026-11-27)
+          
+          [Qualification 45963087833](https://github.com/metalogiclabs/nucleus/actions/runs/45963087833)
+          established ten new correct native ACCEPTs, including eqType,
+          eqRec, boolRecEqns and prodRecEqns. The current cohort has
+          92 ACCEPT, 51 REJECT and 213 UNKNOWN (356 inputs). The prior cohort
+          remains 63A/51R/242U. No protected decisive verdict was lost.
+          All twelve earlier native iota controls and four external fixtures
+          were preserved. Ten new controls yielded 1 ACCEPT, 3 REJECT and
+          6 UNKNOWN (including false Boolean equality); no false ACCEPT.
+          
+          The indexed certificate reconstructs the entire identity family,
+          constructor, recursor telescope and rule body. It promotes only
+          opaque signatures, not indexed reduction or K authority. The
+          exact runtime manifest and original fixtures are retained.
+          Full indexed/recursive support and whole-Mathlib acceptance are
+          not established.
+          ''')
+          PY
+          python3 -m py_compile scripts/verify_source_import.py
+          python3 scripts/verify_source_import.py
+      - name: Test permanent regressions and publish stacked review branch
+        run: |
+          set -euo pipefail
+          cargo test --locked --test native32_identity
+          python3 -m unittest discover -s tests_py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b research/native32-identity-qualified-20261127
+          git add src scripts/verify_source_import.py evidence/native32-identity-qualification-20261127.json docs/QUALIFICATION.md tests/native32_identity.rs tests/fixtures/native32-identity
+          test "$(git rev-parse "$(git write-tree):src")" = 49ea54e287da5d66c757fac43414dc69634da868
+          git commit -m "Qualify native indexed identity signatures and authentic computation proofs"
+          git push origin HEAD:refs/heads/research/native32-identity-qualified-20261127
+          git rev-parse HEAD
