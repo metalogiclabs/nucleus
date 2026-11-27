@@ -25,7 +25,7 @@ fn check(name: &str, expected: i32) {
 fn typed_k_native_and_negative_controls() {
     check("099_ruleK",0);
     check("100_ruleKbad",2);
-    check("129_etaRuleK",2);
+    check("129_etaRuleK",0);
     check("075_typeSingletonRecReduction",2);
     check("041_kEqK",2);
     check("constructor-major-good",0);

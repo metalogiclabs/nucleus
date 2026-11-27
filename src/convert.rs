@@ -2170,6 +2170,17 @@ fn compare_values(
                     }
                     RuleKAttempt::NotApplicable => {}
                 }
+                if depth == context.len() {
+                    for (source, other) in [(left, right), (right, left)] {
+                        if let Some((reduced, applied, body_context)) =
+                            checker.partial_rule_k_eta_pair(source, other, context, current_budget)
+                        {
+                            work.push((TypeValue::Term(reduced), TypeValue::Term(applied),
+                                depth + 1, body_context));
+                            return Judgment::proven((), "typed-partial-k-eta-opening");
+                        }
+                    }
+                }
                 if one_neutral_head_is_free(left, right)
                     && (checker.certified_stuck_nonproof_recursor_on_local(
                         left,

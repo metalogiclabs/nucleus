@@ -159,3 +159,28 @@ bounded expansion for fully reconstructed identity families, not
 general indexed or recursive verification. Partial recursor eta
 and recursive dependencies still decline. Exact source and inputs
 are retained in the qualification manifest and artifact.
+# Typed partial K follow-up
+
+[Qualification 45970879447](https://github.com/metalogiclabs/nucleus/actions/runs/45970879447)
+extends exact PR #4 source `61baa9e5` with a typed eta opening of precisely
+one missing major premise. Both functions' actual captured argument types,
+complete function types and fresh-local support are checked before the
+existing constructor/major-domain K compatibility check can execute.
+The [separate manifest](../evidence/native32-partial-k-qualification-20261127.json)
+retains the parent qualification unchanged.
+
+The authentic `renovation/129_etaRuleK` changes UNKNOWN to ACCEPT in both
+overlapping 356-input cohorts. Current: 94 ACCEPT / 51 REJECT / 211 UNKNOWN;
+earlier: 64 / 51 / 241. All previously decisive verdicts are preserved.
+The preceding full-K gain belongs to PR #4 and is not counted again.
+
+Rust: 371 passed, 17 ignored; Python: 27 passed. Fourteen native controls
+were compared with Lean at `cb633112`: this includes existing valid
+unsupported cases and three new invalid index/argument controls, all of
+which remain UNKNOWN in Nucleus. Source family reconstruction, flags,
+launcher and prior manifests are unchanged. False Boolean equality,
+neutral singleton structure eta and recursive inductives remain unresolved.
+
+The [retained artifact 15185455830](https://github.com/metalogiclabs/nucleus/actions/runs/45970879447/artifacts/15185455830)
+was independently SHA-256 and CRC verified (22 entries); its 25 source files
+reconstruct source tree `1f0d18bf3ca366d357f76f72290916ee85d0617a`.
