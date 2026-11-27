@@ -90,7 +90,7 @@ jobs:
               let common=[
                   pi(family.clone(),sort(levels[0].clone())),
                   app(var(0),constant(z,&[])),
-                  pi(family.clone(),pi(app(var(2),var(0)),app(var(3),app(constant(s,&[]),var(1))))];
+                  pi(family.clone(),pi(app(var(2),var(0)),app(var(3),app(constant(s,&[]),var(1)))))];
               let expected=wrap(&common,pi(family.clone(),app(var(3),var(0))),false);
               need(from_expr(t,num(rec,"type")?,&mut fuel,0)?==expected)?;
               let [zr,sr]=arr(rec,"rules")? else{return None};
