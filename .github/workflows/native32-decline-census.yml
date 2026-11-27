@@ -1,0 +1,164 @@
+name: Native 3.2 first-refusal census on exact PR 6 and quotient preview
+on:
+  push:
+    branches: [test/native32-decline-census-12ce8435]
+    paths: ['.github/workflows/native32-decline-census.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  census:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Freeze exact parent, artifacts and unmodified checker
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          P=c34ceab8bfa6c233bd272b95a280954aa32fad61
+          git merge-base --is-ancestor "$P" HEAD
+          git diff --exit-code "$P" HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json evidence scripts tests tests_py
+          test "$(git rev-parse HEAD:src)" = 2a3a066c4232b1edf733585e68f1c09221651324
+          python3 scripts/verify_source_import.py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15186501160/zip > evidence-run/qualified.zip
+          gh api repos/leanprover/lean-kernel-arena-beta/actions/artifacts/15207280757/zip > evidence-run/corpus.zip
+          gh api repos/leanprover/lean-kernel-arena-beta/actions/artifacts/15206839927/zip > evidence-run/site.zip
+          printf '%s  %s\n' 1c42bbed916ae0a4c1b53c9d94b680a26d405fd17cb7235dd61137b186985cb0 evidence-run/qualified.zip c6ae197bc9c5197600b083ad7655d3d08554142622600db8515a70b4f5eb9274 evidence-run/corpus.zip 11cd20800856d05f006d1d64050b95ca069d258f25487588c70d2d67ded9bdc2 evidence-run/site.zip | sha256sum -c -
+          cargo build --locked --release --features diagnostics > evidence-run/baseline-build.log 2>&1
+          cp target/release/metatron-kernel evidence-run/baseline
+      - name: Instrument refusal sites without changing typing or verdict logic
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def patch(path, pairs):
+              p=Path(path); s=p.read_text()
+              for a,b in pairs:
+                  assert s.count(a)==1,(path,a,s.count(a))
+                  s=s.replace(a,b)
+              p.write_text(s)
+          patch('src/renovation/nullary.rs',[
+              ('fn need(ok:bool)->Option<()> { ok.then_some(()) }',
+               '#[track_caller]\nfn need(ok:bool)->Option<()> { if !ok { let l=std::panic::Location::caller(); eprintln!("CENSUS_GUARD {}:{}",l.file(),l.line()); } ok.then_some(()) }'),
+          ])
+          patch('src/renovation.rs',[
+              ('    if whole_export.as_ref().is_some_and(|rows| nullary::admits(rows)) {',
+               '    if whole_export.is_none() { eprintln!("CENSUS_ROUTE whole_export_unavailable"); }\n    if whole_export.as_ref().is_some_and(|rows| nullary::admits(rows)) {'),
+          ])
+          patch('src/renovation/nullary/composite.rs',[
+              ('    for row in rows{', '    eprintln!("CENSUS_ROUTE composite_enter");\n    for (row_no,row) in rows.iter().enumerate(){'),
+              ('            let cert=prior.certify(&tables,row.get("inductive")?)?;',
+               '            let cert=prior.certify(&tables,row.get("inductive")?).or_else(|| { let b=&row["inductive"]; let t=&b["types"][0]; eprintln!("CENSUS_STOP family row={} types={} params={} indices={} recursive={} nested={}",row_no,b["types"].as_array().map_or(0,|v|v.len()),t["numParams"],t["numIndices"],t["isRec"],t["numNested"]); None })?;'),
+              ('            if keys(row,&["ie","letE"]){tables.add_ordinary_let(row)?;}\n            else{tables.add(row)?;}',
+               '            if keys(row,&["ie","letE"]){tables.add_ordinary_let(row).or_else(||{eprintln!("CENSUS_STOP let_record row={}",row_no);None})?;}\n            else{tables.add(row).or_else(||{eprintln!("CENSUS_STOP table row={} keys={:?}",row_no,row.as_object().map(|o|o.keys().collect::<Vec<_>>()));None})?;}'),
+              ('    need(families>0&&count>0)?;',
+               '    if !(families>0&&count>0) {eprintln!("CENSUS_STOP composition_shape families={} ordinary={}",families,count);}\n    need(families>0&&count>0)?;'),
+              ('    let export=crate::parser::parse_ordinary_native(meta,&ordinary_rows).ok()?.resolve().ok()?;',
+               '    let export=crate::parser::parse_ordinary_native(meta,&ordinary_rows).ok().or_else(||{eprintln!("CENSUS_STOP ordinary_parse");None})?.resolve().ok().or_else(||{eprintln!("CENSUS_STOP ordinary_resolve");None})?;'),
+              ('                derivation.promote_all(&export,cert.signatures,limits.judgment_steps,policy).ok()?;',
+               '                derivation.promote_all(&export,cert.signatures,limits.judgment_steps,policy).ok().or_else(||{eprintln!("CENSUS_STOP signature_promotion");None})?;'),
+              ('                    env=env.install_recursor_reduction(name,reduction).ok()?;',
+               '                    env=env.install_recursor_reduction(name,reduction).ok().or_else(||{eprintln!("CENSUS_STOP reduction_install");None})?;'),
+              ('                if hint.is_some(){need(checker.is_type(ty,limits.judgment_steps).is_proven())?;}\n                else{need(checker.is_proposition(ty,limits.judgment_steps).is_proven())?;}',
+               '                if hint.is_some(){need(checker.is_type(ty,limits.judgment_steps).is_proven()).or_else(||{eprintln!("CENSUS_STOP definition_type stage={}",i);None})?;}\n                else{need(checker.is_proposition(ty,limits.judgment_steps).is_proven()).or_else(||{eprintln!("CENSUS_STOP theorem_type stage={}",i);None})?;}'),
+              ('                need(checker.check_formed(value,&expected,limits.judgment_steps).is_proven())?;',
+               '                need(checker.check_formed(value,&expected,limits.judgment_steps).is_proven()).or_else(||{eprintln!("CENSUS_STOP body_typing stage={}",i);None})?;'),
+              ('                env=env.extend(name,d).ok()?;',
+               '                env=env.extend(name,d).ok().or_else(||{eprintln!("CENSUS_STOP environment_extend");None})?;'),
+          ])
+          PY
+          git diff -- src > evidence-run/instrumentation.patch
+          cargo build --locked --release --features diagnostics > evidence-run/diagnostic-build.log 2>&1
+          cp target/release/metatron-kernel evidence-run/diagnostic
+          sha256sum evidence-run/baseline evidence-run/diagnostic arena.py arena-flags.json > evidence-run/binaries.sha256
+      - name: Differential census over exact new preview and prior qualification receipts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,hashlib,io,json,os,pathlib,re,subprocess,tarfile,time,zipfile
+          O=pathlib.Path('evidence-run')
+          def loadzip(name):
+              z=zipfile.ZipFile(O/name); assert z.testzip() is None,name; return z
+          site=json.loads(loadzip('site.zip').read('results.json'))
+          assert site['meta']['git_revision']=='12ce8435ab167ea63ebfa157b3ec7c98bef0d24b',site['meta']
+          tests={t['name']:t for t in site['tests']}
+          refs={r['test']:r for r in site['results'] if r['checker']=='official'}
+          old={r['name']:r for r in json.loads(loadzip('qualified.zip').read('current-rows.json'))}
+          assert collections.Counter(r['exit'] for r in old.values())=={0:104,1:51,2:201}
+          tar=tarfile.open(fileobj=io.BytesIO(loadzip('corpus.zip').read('lean-arena-tests.tar.gz')))
+          members=[m for m in tar.getmembers() if m.isfile() and m.name.endswith('.ndjson')]
+          assert members and len({m.name for m in members})==len(members)
+          env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))}
+          env.update(json.loads(pathlib.Path('arena-flags.json').read_text()))
+          def run(raw,b):
+              if len(raw)>10*1024*1024:return 2,'NUCLEUS_DECLINED: input byte allowance',0.0
+              t=time.monotonic()
+              try:
+                  p=subprocess.run([str((O/b).resolve())],input=raw,capture_output=True,env=env,timeout=120)
+                  return p.returncode if p.returncode>=0 else 128-p.returncode,p.stderr.decode(errors='replace'),round(time.monotonic()-t,6)
+              except subprocess.TimeoutExpired as e:
+                  return 124,(e.stderr or b'').decode(errors='replace'),round(time.monotonic()-t,6)
+          rows=[]; drift=[]; wrong=[]; old_drift=[]
+          with (O/'rows.jsonl').open('w') as f:
+              for m in members:
+                  name=m.name.split('/',1)[1].removesuffix('.ndjson')
+                  raw=tar.extractfile(m).read(); sha=hashlib.sha256(raw).hexdigest()
+                  assert sha==tests[name]['sha256'],name
+                  meta=json.loads(raw.splitlines()[0])['meta']
+                  base,err,sec=run(raw,'baseline')
+                  diag,trace,dsec=run(raw,'diagnostic')
+                  stops=[l for l in trace.splitlines() if l.startswith('CENSUS_STOP ')]
+                  guards=[l for l in trace.splitlines() if l.startswith('CENSUS_GUARD ')]
+                  routes=[l for l in trace.splitlines() if l.startswith('CENSUS_ROUTE ')]
+                  key='not_declined'
+                  if base==2:
+                      if 'input byte allowance' in err:key='input_byte_allowance'
+                      elif any('whole_export_unavailable' in l for l in routes):key='record_cap'
+                      elif stops:
+                          key=stops[0].split()[1]
+                          if key=='table':
+                              key+=':'+stops[0].split('keys=',1)[-1]
+                          if key=='family':
+                              key+=':'+re.sub(r'^.*?types=','types=',stops[0])
+                      elif guards:key='unclassified_guard:'+guards[-1].split(' ',1)[1]
+                      else:key='unclassified_no_trace'
+                  r={'name':name,'sha256':sha,'format':meta['format']['version'],'lean':meta['lean']['githash'],
+                     'expected':tests[name]['outcome'],'official':refs.get(name,{}).get('exit_code'),'baseline':base,'diagnostic':diag,
+                     'seconds':sec,'diagnostic_seconds':dsec,'cluster':key,'stops':stops,'guards':guards,'routes':routes,
+                     'stderr':err,'prior_same_bytes':name in old and old[name]['sha256']==sha}
+                  rows.append(r);f.write(json.dumps(r)+'\n');f.flush()
+                  if base!=diag:drift.append(name)
+                  if r['prior_same_bytes'] and base!=old[name]['exit']:old_drift.append(name)
+                  if (base==0 and r['expected']=='reject') or (base==1 and r['expected']=='accept'):wrong.append(name)
+                  print('CASE',name,base,diag,key,flush=True)
+          def count(rs):return dict(collections.Counter(r['baseline'] for r in rs))
+          declines=[r for r in rows if r['baseline']==2]
+          clusters=collections.defaultdict(list)
+          for r in declines:clusters[r['cluster']].append(r['name'])
+          quotient=[r for r in rows if any(k.lower() in r['name'].lower() for k in ('quotOfPropIsType','quotOfPropNoProofIrrel','quotLiftMk','quotLiftNoProofIrrel'))]
+          summary={'input_count':len(rows),'counts':count(rows),'native_counts':count([r for r in rows if r['format']=='3.2.0']),
+                   'same_bytes_prior':sum(r['prior_same_bytes'] for r in rows),'old_drift':old_drift,'instrumentation_drift':drift,
+                   'wrong_prescribed':wrong,'other_exits':[r['name'] for r in rows if r['baseline'] not in (0,1,2)],
+                   'clusters':[{'mechanism':k,'count':len(v),'cases':v} for k,v in sorted(clusters.items(),key=lambda kv:(-len(kv[1]),kv[0]))],
+                   'quotient':quotient,'reference_checkers':site['checkers']}
+          (O/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print('SUMMARY',json.dumps({**summary,'clusters':[{'mechanism':c['mechanism'],'count':c['count']} for c in summary['clusters']]}),flush=True)
+          assert not drift and not old_drift and not wrong and not summary['other_exits'],summary
+          assert len(quotient)==4,[r['name'] for r in quotient]
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-decline-census
+          path: evidence-run/
+          retention-days: 60
