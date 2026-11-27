@@ -1,0 +1,306 @@
+name: Native 3.2 certified inductive composition
+on:
+  push:
+    branches: [research/native32-compositional-20261127]
+    paths: ['.github/workflows/native32-compositional.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Verify exact base and install bounded composition candidate
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          test "$(git rev-parse HEAD^)" = b96b1069f2d0aed4cfede8bd2e7d2d0166a0ab4d
+          python3 scripts/verify_source_import.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation/nullary/parametric.rs')
+          s=p.read_text()
+          def once(a,b):
+              global s
+              assert s.count(a)==1,(a,s.count(a))
+              s=s.replace(a,b)
+          once('use std::rc::Rc;', 'use std::rc::Rc;\nuse std::collections::HashMap;')
+          once('fn infer(t:&T,ctx:&mut Vec<T>,fuel:&mut Budget,depth:usize)->Option<T>{', '''#[cfg(test)]
+          fn infer(t:&T,ctx:&mut Vec<T>,fuel:&mut Budget,depth:usize)->Option<T>{
+              infer_with_prior(t,ctx,fuel,depth,&HashMap::new())
+          }
+          // Only earlier fully reconstructed closed family types may supply
+          // constant typing authority.
+          fn infer_with_prior(t:&T,ctx:&mut Vec<T>,fuel:&mut Budget,depth:usize,prior:&HashMap<usize,T>)->Option<T>{''')
+          once('        Term::S(u)=>Some(sort(succ(u.clone()))),','        Term::S(u)=>Some(sort(succ(u.clone()))),\n        Term::C(n,us) if us.is_empty()=>prior.get(n).cloned(),')
+          once('let x=as_sort(&infer(d,ctx,fuel,depth+1)?)?;','let x=as_sort(&infer_with_prior(d,ctx,fuel,depth+1,prior)?)?;')
+          once('let y=as_sort(&infer(b,ctx,fuel,depth+1)?);','let y=as_sort(&infer_with_prior(b,ctx,fuel,depth+1,prior)?);')
+          once('let ft=infer(f,ctx,fuel,depth+1)?;','let ft=infer_with_prior(f,ctx,fuel,depth+1,prior)?;')
+          once('need(infer(a,ctx,fuel,depth+1)?==*domain)?;','need(infer_with_prior(a,ctx,fuel,depth+1,prior)?==*domain)?;')
+          once('fn checked_family(t:&Tables,b:&Value)->Option<Family>{','''fn checked_family(t:&Tables,b:&Value)->Option<Family>{
+              checked_family_with_prior(t,b,&HashMap::new())
+          }
+          fn checked_family_with_prior(t:&Tables,b:&Value,prior:&HashMap<usize,T>)->Option<Family>{''')
+          once('as_sort(&infer(d,&mut ctx,&mut fuel,0)?)?;','as_sort(&infer_with_prior(d,&mut ctx,&mut fuel,0,prior)?)?;')
+          once('let u=as_sort(&infer(d,&mut cx,&mut fuel,0)?)?;','let u=as_sort(&infer_with_prior(d,&mut cx,&mut fuel,0,prior)?)?;')
+          once('mod projection;',r'''// Only successful full reconstruction produces opaque signatures.
+          #[derive(Default)]
+          pub(super) struct PriorFamilies(HashMap<usize,T>);
+          impl PriorFamilies {
+              pub(super) fn certify(&mut self,t:&Tables,b:&Value)->Option<Vec<crate::inductive::DerivedSignature>> {
+                  use crate::inductive::{DerivedSignature,OpaqueInductiveKind};
+                  use crate::id::{ExprId,NameId};
+                  let f=checked_family_with_prior(t,b,&self.0)?;
+                  let signature=|row:&Value,kind|->Option<DerivedSignature>{
+                      Some(DerivedSignature{kind,name:NameId(u64::try_from(num(row,"name")?).ok()?),
+                          level_params:numbers(row,"levelParams")?.into_iter().map(|n|u64::try_from(n).ok().map(NameId)).collect::<Option<Vec<_>>>()?,
+                          ty:ExprId(u64::try_from(num(row,"type")?).ok()?)})
+                  };
+                  let mut out=Vec::new();
+                  for (tag,kind) in [("types",OpaqueInductiveKind::Type),("ctors",OpaqueInductiveKind::Constructor),("recs",OpaqueInductiveKind::Recursor)]{
+                      for row in arr(b,tag)? {out.push(signature(row,kind)?);}
+                  }
+                  if f.params==0 && f.universes.is_empty() {
+                      need(self.0.insert(f.name,f.ty).is_none())?;
+                  }
+                  Some(out)
+              }
+          }
+
+          mod projection;''')
+          p.write_text(s)
+          p=Path('src/renovation/nullary.rs');s=p.read_text()
+          assert s.count('mod parametric;')==1
+          s=s.replace('mod parametric;','mod parametric;\nmod composite;')
+          marker='pub(super) fn projection_outcome(rows:&[Value])->Option<super::Outcome>{'
+          assert s.count(marker)==1
+          s=s.replace(marker,'''pub(super) fn composite_outcome(rows:&[Value],meta:Value)->Option<super::Outcome>{
+              composite::check(rows,meta)
+          }
+
+          '''+marker)
+          p.write_text(s)
+          Path('src/renovation/nullary/composite.rs').write_text(r'''//! Compose independently reconstructed nonrecursive families and checked
+          //! ordinary declarations. Acceptance-only: omitted conversion rules
+          //! cannot justify rejection. No raw inductive enters the legacy
+          //! parser; no iota, eta, projection, K, literal or axiom authority.
+          use super::*;
+          use crate::convert::DeltaPolicy;
+          use crate::environment::{ConstantDecl,Environment};
+          use crate::id::NameId;
+          use crate::inductive::{ClosedNonrecursiveDerivation,DerivedSignature};
+          use crate::level::LevelTerm;
+          use crate::syntax::Declaration;
+          use crate::typecheck::{TypeChecker,TypeValue};
+          use crate::value::EnvFrame;
+
+          enum Stage { Family(Vec<DerivedSignature>), Ordinary(usize) }
+
+          pub(super) fn check(rows:&[Value],meta:Value)->Option<super::super::Outcome>{
+              need(rows.len()<=MAX_RECORDS)?;
+              let mut tables=Tables::new();
+              let mut prior=parametric::PriorFamilies::default();
+              let mut stages=Vec::new();
+              let mut names=HashSet::new();
+              let mut ordinary_rows=Vec::new();
+              let mut count=0usize;
+              let mut families=0usize;
+              for row in rows{
+                  if keys(row,&["inductive"]){
+                      let cert=prior.certify(&tables,row.get("inductive")?)?;
+                      need(cert.iter().all(|s|names.insert(s.name)))?;
+                      stages.push(Stage::Family(cert));
+                      families+=1;
+                      continue;
+                  }
+                  let (item,is_def)=if keys(row,&["def"]){(row.get("def")?,true)}
+                  else if keys(row,&["thm"]){(row.get("thm")?,false)}
+                  else {
+                      if keys(row,&["ie","letE"]){tables.add_ordinary_let(row)?;}
+                      else{tables.add(row)?;}
+                      ordinary_rows.push(row.clone());
+                      continue;
+                  };
+                  if is_def {
+                      need(keys(item,&["all","hints","levelParams","name","safety","type","value"]))?;
+                      need(item.get("safety")?.as_str()?=="safe")?;
+                      let h=item.get("hints")?;
+                      need(matches!(h.as_str(),Some("opaque"|"abbrev"))||(keys(h,&["regular"])&&num(h,"regular").is_some()))?;
+                  }else{need(keys(item,&["all","levelParams","name","type","value"]))?;}
+                  let name=num(item,"name")?;
+                  need(tables.valid_name(name)&&numbers(item,"all")?==[name])?;
+                  need(names.insert(NameId(u64::try_from(name).ok()?)))?;
+                  let ps=numbers(item,"levelParams")?;
+                  let mut unique=HashSet::new();
+                  need(ps.iter().all(|&n|tables.valid_name(n)&&unique.insert(n)))?;
+                  need(num(item,"type")?<tables.exprs.len()&&num(item,"value")?<tables.exprs.len())?;
+                  stages.push(Stage::Ordinary(count));
+                  count+=1;
+                  ordinary_rows.push(row.clone());
+              }
+              need(families>0&&count>0)?;
+              // No version relabeling. Only ordinary and table rows enter
+              // the shared native parser. Family authority is reconstructed.
+              let export=crate::parser::parse_ordinary_native(meta,&ordinary_rows).ok()?.resolve().ok()?;
+              need(export.declarations.len()==count)?;
+              let limits=crate::checker::Limits::default();
+              let policy=DeltaPolicy::GuardedSemanticFallback;
+              let mut env=Environment::empty();
+              for stage in stages {
+                  match stage{
+                      Stage::Family(signatures)=>{
+                          let mut derivation=ClosedNonrecursiveDerivation::begin(&env);
+                          derivation.promote_all(&export,signatures,limits.judgment_steps,policy).ok()?;
+                          env=derivation.finish();
+                      },
+                      Stage::Ordinary(i)=>{
+                          let (name,ps,ty,value,hint)=match export.declarations.get(i)?{
+                              Declaration::Definition{name,level_params,ty,value,preferred_for_reduction}=>
+                                  (*name,level_params.clone(),*ty,*value,Some(*preferred_for_reduction)),
+                              Declaration::Theorem{name,level_params,ty,value,..}=>
+                                  (*name,level_params.clone(),*ty,*value,None),
+                              _=>return None,
+                          };
+                          let checker=TypeChecker::with_level_substitution(
+                              &export.exprs,&export.levels,&env,
+                              ps.iter().map(|p|(*p,LevelTerm::param(format!("u#{}",p.0)))).collect()
+                          ).with_delta_policy(policy);
+                          if hint.is_some(){need(checker.is_type(ty,limits.judgment_steps).is_proven())?;}
+                          else{need(checker.is_proposition(ty,limits.judgment_steps).is_proven())?;}
+                          let expected=TypeValue::Term(checker.closure(ty,EnvFrame::empty()));
+                          need(checker.check_formed(value,&expected,limits.judgment_steps).is_proven())?;
+                          let d=if let Some(h)=hint{ConstantDecl::definition(ps,ty,value,h)}
+                          else{ConstantDecl::theorem(ps,ty)};
+                          env=env.extend(name,d).ok()?;
+                      }
+                  }
+              }
+              Some(super::super::Outcome::AcceptReconstructed)
+          }
+          ''')
+          p=Path('src/renovation.rs');s=p.read_text()
+          old='native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta))'
+          new='native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta.clone()).or_else(||nullary::composite_outcome(rows,meta)))'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,new))
+          PY
+          git diff --exit-code -- . ':!src/renovation.rs' ':!src/renovation/nullary.rs' ':!src/renovation/nullary/parametric.rs'
+          git add src
+          git diff --cached -- src > evidence-run/composite.patch
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          python3 scripts/test.py
+          python3 -m unittest discover -s tests_py
+          cargo build --locked --release --features diagnostics
+          sha256sum target/release/metatron-kernel arena.py arena-flags.json > evidence-run/binary.sha256
+      - name: Verify immutable baseline and replay authentic witnesses
+        run: |
+          set -euo pipefail
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15172160773/zip > evidence-run/base.zip
+          printf '%s  %s\n' 7dc78b7df4af5d35db050b9c438bb06aa359d1e326c02c73104d212668286180 evidence-run/base.zip | sha256sum -c -
+          python3 - <<'PY'
+          import collections,hashlib,io,json,pathlib,subprocess,tarfile,zipfile
+          p=pathlib.Path('evidence-run')
+          z=zipfile.ZipFile(p/'base.zip');assert z.testzip() is None
+          baseline=json.loads(z.read('corpus-rows.json'))
+          expected={r['name']:r for r in baseline}
+          assert len(expected)==356 and collections.Counter(r['exit'] for r in baseline)=={0:62,1:51,2:243}
+          def inputs(zip_bytes):
+              zz=zipfile.ZipFile(io.BytesIO(zip_bytes));assert zz.testzip() is None
+              tar=tarfile.open(fileobj=io.BytesIO(zz.read('lean-arena-tests.tar.gz')))
+              return {m.name.split('/',1)[1].removesuffix('.ndjson'):tar.extractfile(m).read() for m in tar.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          current=inputs(z.read('test-tarball.zip'))
+          assert len(current)==356 and set(current)==set(expected)
+          assert all(hashlib.sha256(b).hexdigest()==expected[n]['sha256'] for n,b in current.items())
+          def run(raw):
+              q=subprocess.run(['python3','arena.py'],input=raw,capture_output=True,timeout=120)
+              return q.returncode,q.stderr.decode(errors='replace')
+          targets=['tutorial/036_empty','tutorial/037_boolType','tutorial/038_twoBool']
+          witnesses=[]
+          for n in targets:
+              raw=current[n];code,err=run(raw)
+              row={'name':n,'sha256':expected[n]['sha256'],'baseline':expected[n]['exit'],'exit':code,'stderr':err}
+              witnesses.append(row); print('WITNESS '+json.dumps(row),flush=True)
+          (p/'witnesses.json').write_text(json.dumps(witnesses,indent=2)+'\n')
+          rows=[json.loads(l) for l in current[targets[-1]].splitlines()]
+          positions=[i for i,r in enumerate(rows) if 'inductive' in r];assert len(positions)==2
+          def mutated(f):
+              a=json.loads(json.dumps(rows));f(a)
+              return b''.join(json.dumps(r,separators=(',',':')).encode()+b'\n' for r in a)
+          first,second=positions
+          cases=[
+            ('wrong-first-rule',lambda a:a[first]['inductive']['recs'][0]['rules'][0].update(rhs=a[first]['inductive']['recs'][0]['rules'][1]['rhs'])),
+            ('wrong-second-rule',lambda a:a[second]['inductive']['recs'][0]['rules'][0].update(rhs=a[first]['inductive']['recs'][0]['rules'][0]['rhs'])),
+            ('wrong-field-count',lambda a:a[second]['inductive']['ctors'][0].update(numFields=1)),
+            ('false-recursive-flag',lambda a:a[second]['inductive']['types'][0].update(isRec=True)),
+            ('unsafe-family',lambda a:a[second]['inductive']['types'][0].update(isUnsafe=True)),
+            ('missing-prior-family',lambda a:a.pop(first)),
+            ('duplicate-family',lambda a:a.insert(second+1,a[first])),
+            ('unsupported-final-axiom',lambda a:a.append({'axiom':{'name':16,'type':0,'levelParams':[],'isUnsafe':False}})),
+            ('wrong-final-body',lambda a:a[-1]['def'].update(value=5)),
+            ('self-dependent-field',lambda a:next(r for r in a if r.get('ie')==23)['forallE'].update(type=22)),
+            ('extra-declaration-field',lambda a:a[-1]['def'].update(forged=True)),
+          ]
+          control=[]
+          for name,f in cases:
+              raw=mutated(f);code,err=run(raw); row={'name':name,'sha256':hashlib.sha256(raw).hexdigest(),'exit':code,'stderr':err}
+              control.append(row); print('CONTROL '+json.dumps(row),flush=True)
+          (p/'controls.json').write_text(json.dumps(control,indent=2)+'\n')
+          # Preserve all observations even if a witness fails.
+          oldzip=zipfile.ZipFile(io.BytesIO(z.read('prior-qualification.zip')));assert oldzip.testzip() is None
+          old=inputs(oldzip.read('tarball.zip'))
+          oldbase={r['name']:r for r in json.loads(z.read('prior-rows.json'))}
+          for cohort,ins,b,field in [('current',current,expected,'exit'),('prior',old,oldbase,'new')]:
+              assert len(ins)==356 and set(ins)==set(b)
+              result=[]
+              for n,raw in ins.items():
+                  a=b[n]; h=hashlib.sha256(raw).hexdigest();assert h==a['sha256'],n
+                  code,err=run(raw)
+                  row={'name':n,'sha256':h,'format':a['format'],'expected':a['expected'],'before':a[field],'exit':code,'stderr':err}
+                  result.append(row)
+                  if code!=a[field]:print('CHANGE '+cohort+' '+json.dumps(row),flush=True)
+              (p/(cohort+'-rows.json')).write_text(json.dumps(result,indent=2)+'\n')
+              changed=[r for r in result if r['before']!=r['exit']]
+              summary={'cohort':cohort,'counts':dict(collections.Counter(r['exit'] for r in result)),'changed':changed,'input_count':len(result)}
+              (p/(cohort+'-summary.json')).write_text(json.dumps(summary,indent=2)+'\n')
+              print('SUMMARY '+json.dumps(summary),flush=True)
+          external=[]
+          for r in json.loads(z.read('new-regressions.json')):
+              raw=z.read('new-inputs/'+r['case']);assert hashlib.sha256(raw).hexdigest()==r['sha256']
+              code,err=run(raw); external.append({'name':r['case'],'before':r['exit'],'exit':code,'sha256':r['sha256'],'stderr':err})
+          (p/'external.json').write_text(json.dumps(external,indent=2)+'\n')
+          PY
+      - name: Enforce frozen verdicts and genuine composition gains
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('evidence-run')
+          for cohort in ('current','prior'):
+              r=json.loads((p/(cohort+'-summary.json')).read_text())
+              assert r['input_count']==356
+              assert all(c['format']=='3.2.0' and c['before']==2 and c['expected']=='accept' and c['exit']==0 for c in r['changed']),r
+          w=json.loads((p/'witnesses.json').read_text())
+          assert len(w)==3 and all(r['baseline']==2 and r['exit']==0 for r in w),w
+          c=json.loads((p/'controls.json').read_text())
+          assert len(c)==11 and all(r['exit'] in (1,2) for r in c),c
+          e=json.loads((p/'external.json').read_text())
+          assert len(e)==4 and all(r['before']==r['exit'] for r in e),e
+          print('QUALIFIED: three native composition witnesses and both protected cohorts.')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-compositional-evidence
+          path: evidence-run/
+          retention-days: 60
