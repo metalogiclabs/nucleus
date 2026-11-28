@@ -1,0 +1,332 @@
+name: Native projection canonical name identity on qualified projection source
+on:
+  push:
+    branches: [test/native32-projection-name-identity-8a22ec10]
+    paths: ['.github/workflows/native32-projection-name-identity.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - name: Freeze qualified projection source and exact upstream witness
+        run: |
+          set -euo pipefail
+          mkdir -p evidence-run
+          git rev-parse HEAD > evidence-run/harness.txt
+          git merge-base --is-ancestor 586d70195fa06a587291e21fb60e4cecd27cd213 HEAD
+          git diff --exit-code c34ceab8bfa6c233bd272b95a280954aa32fad61 HEAD -- src Cargo.toml Cargo.lock arena.py arena-flags.json scripts tests tests_py
+          gh api repos/metalogiclabs/nucleus/actions/artifacts/15232137419/zip > evidence-run/projection.zip
+          printf '%s  %s\n' c7de913e375eeae30ed36f40ffca884e353b5578d3d5b1c4bb69c4e65ebf8902 evidence-run/projection.zip | sha256sum -c -
+          python3 - <<'PY'
+          import pathlib,zipfile
+          o=pathlib.Path('evidence-run')
+          with zipfile.ZipFile(o/'projection.zip') as z:
+              assert z.testzip() is None
+              (o/'projection-source.tar.gz').write_bytes(z.read('candidate-source.tar.gz'))
+              (o/'pr6').write_bytes(z.read('baseline'))
+              (o/'pr6').chmod(0o755)
+          PY
+          tar -xzf evidence-run/projection-source.tar.gz
+          git add src
+          test "$(git rev-parse "$(git write-tree):src")" = 4ed17b5e3851929b4b57351ae231fd234afc10b3
+          printf '%s  %s\n' ae08278265b25270208c483a8b10d0c010b39822df382627dc3fdf29a7e1ed4c arena-flags.json | sha256sum -c -
+          cargo build --locked --release --features diagnostics > evidence-run/baseline-build.log 2>&1
+          cp target/release/metatron-kernel evidence-run/baseline
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jasisz/gruszka/8a22ec10237008d562abb5efd8264c79f4b89cf9/tests/adv/good_proj_name_repeated.ndjson -o evidence-run/upstream.ndjson
+          test "$(git hash-object evidence-run/upstream.ndjson)" = 51a821e88d0ad640245d5c2f03970fcdbd5b1c73
+      - name: Transport projection identity through a validated name quotient
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/renovation/nullary.rs')
+          s=p.read_text()
+          s+=r'''
+          // Bounded name-alias admission: keep declaration and universe
+          // authority separate. Only aliases used as projection typeName
+          // may be collapsed; all other name positions must refer to
+          // their first representative. Every changed row is subsequently
+          // checked by the existing complete source certificate.
+          fn projection_name_rows(rows:&[Value])->Option<Vec<Value>> {
+              use std::collections::HashMap;
+              need(rows.len()<=MAX_RECORDS)?;
+              let mut ids:Vec<(usize,bool)>=vec![(0,false)];
+              let mut canonical=HashMap::<(usize,NamePart),usize>::new();
+              let mut next=1usize;
+              let mut out=Vec::with_capacity(rows.len());
+              let mut used=HashSet::new();
+              let mut aliases=HashSet::new();
+              fn replace(v:&mut Value,ids:&[(usize,bool)],alias:bool)->Option<()>{
+                  let (i,a)=*ids.get(nat(v)?)?;
+                  need(alias||!a)?;
+                  *v=Value::from(u64::try_from(i).ok()?);
+                  Some(())
+              }
+              fn field(v:&mut Value,key:&str,ids:&[(usize,bool)])->Option<()>{
+                  replace(v.get_mut(key)?,ids,false)
+              }
+              fn fields(v:&mut Value,key:&str,ids:&[(usize,bool)])->Option<()>{
+                  for x in v.get_mut(key)?.as_array_mut()? {replace(x,ids,false)?;}
+                  Some(())
+              }
+              for raw in rows {
+                  let mut r=raw.clone();
+                  if keys(raw,&["in","str"])||keys(raw,&["in","num"]){
+                      let old=num(raw,"in")?;
+                      need(old==ids.len())?;
+                      let (tag,part)=if let Some(x)=raw.get("str"){
+                          need(keys(x,&["pre","str"]))?;
+                          ("str",NamePart::Str(x.get("str")?.as_str()?.to_owned()))
+                      }else{
+                          let x=raw.get("num")?;
+                          need(keys(x,&["pre","i"]))?;
+                          ("num",NamePart::Num(num(x,"i")?))
+                      };
+                      let (pre,is_alias)=*ids.get(num(raw.get(tag)?,"pre")?)?;
+                      need(!is_alias)?;
+                      let key=(pre,part);
+                      if let Some(&id)=canonical.get(&key){
+                          ids.push((id,true));
+                          aliases.insert(old);
+                          continue;
+                      }
+                      let id=next;
+                      next=next.checked_add(1)?;
+                      canonical.insert(key,id);
+                      ids.push((id,false));
+                      r["in"]=Value::from(u64::try_from(id).ok()?);
+                      r[tag]["pre"]=Value::from(u64::try_from(pre).ok()?);
+                  }else if keys(raw,&["il","param"]){
+                      field(&mut r,"param",&ids)?;
+                  }else if keys(raw,&["ie","const"]){
+                      field(r.get_mut("const")?,"name",&ids)?;
+                  }else if keys(raw,&["ie","proj"]){
+                      let p=r.get_mut("proj")?;
+                      let id=num(p,"typeName")?;
+                      if ids.get(id)?.1 {used.insert(id);}
+                      replace(p.get_mut("typeName")?,&ids,true)?;
+                  }else if keys(raw,&["ie","forallE"])||keys(raw,&["ie","lam"])||keys(raw,&["ie","letE"]){
+                      let tag=if raw.get("forallE").is_some(){"forallE"}else if raw.get("lam").is_some(){"lam"}else{"letE"};
+                      field(r.get_mut(tag)?,"name",&ids)?;
+                  }else if keys(raw,&["inductive"]){
+                      let block=r.get_mut("inductive")?;
+                      for t in block.get_mut("types")?.as_array_mut()?{
+                          field(t,"name",&ids)?;
+                          for key in ["all","ctors","levelParams"]{fields(t,key,&ids)?;}
+                      }
+                      for c in block.get_mut("ctors")?.as_array_mut()?{
+                          field(c,"name",&ids)?;
+                          field(c,"induct",&ids)?;
+                          fields(c,"levelParams",&ids)?;
+                      }
+                      for rec in block.get_mut("recs")?.as_array_mut()?{
+                          field(rec,"name",&ids)?;
+                          fields(rec,"all",&ids)?;
+                          fields(rec,"levelParams",&ids)?;
+                          for rule in rec.get_mut("rules")?.as_array_mut()?{
+                              field(rule,"ctor",&ids)?;
+                          }
+                      }
+                  }else if keys(raw,&["def"])||keys(raw,&["thm"]){
+                      let tag=if raw.get("def").is_some(){"def"}else{"thm"};
+                      let d=r.get_mut(tag)?;
+                      field(d,"name",&ids)?;
+                      fields(d,"all",&ids)?;
+                      fields(d,"levelParams",&ids)?;
+                  }else{
+                      need(keys(raw,&["il","succ"])||keys(raw,&["il","max"])||keys(raw,&["il","imax"])
+                          ||keys(raw,&["ie","sort"])||keys(raw,&["ie","bvar"])||keys(raw,&["ie","app"]))?;
+                  }
+                  out.push(r);
+              }
+              need(!aliases.is_empty()&&aliases==used)?;
+              Some(out)
+          }
+          pub(super) fn projection_name_outcome(rows:&[Value],meta:Value)->Option<super::Outcome>{
+              let canonical=projection_name_rows(rows)?;
+              // Reconstruct full family/signatures and check every ordinary
+              // declaration in the original order, never import a verdict.
+              composite::check(&canonical,meta)
+          }
+          '''
+          p.write_text(s)
+          p=Path('src/renovation.rs');s=p.read_text()
+          a='native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta.clone()).or_else(||nullary::composite_outcome(rows,meta)))'
+          b='native_meta.and_then(|meta|nullary::ordinary_outcome(rows,meta.clone()).or_else(||nullary::composite_outcome(rows,meta.clone())).or_else(||nullary::projection_name_outcome(rows,meta)))'
+          assert s.count(a)==1;s=s.replace(a,b);p.write_text(s)
+          PY
+          git diff --check
+          git diff --exit-code -- . ':!src/renovation.rs' ':!src/renovation/nullary.rs' ':!evidence-run'
+          git diff -- src > evidence-run/identity.patch
+          git add src/renovation.rs src/renovation/nullary.rs
+          git write-tree > evidence-run/candidate-tree.txt
+          git rev-parse "$(cat evidence-run/candidate-tree.txt):src" > evidence-run/candidate-src-tree.txt
+          tar -czf evidence-run/candidate-source.tar.gz src
+          cargo build --locked --release --features diagnostics > evidence-run/candidate-build.log 2>&1 || { cat evidence-run/candidate-build.log; exit 1; }
+          cp target/release/metatron-kernel evidence-run/candidate
+          sha256sum evidence-run/pr6 evidence-run/baseline evidence-run/candidate arena-flags.json > evidence-run/binaries.sha256
+          python3 scripts/test.py > evidence-run/rust-tests.log 2>&1
+          python3 -m unittest discover -s tests_py > evidence-run/python-tests.log 2>&1
+      - name: Install both exact schema-profile official checkers
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          for pin in a8ad4db 8f3431e; do
+            "$HOME/.elan/bin/elan" toolchain install "leanprover/lean4-pr-releases:pr-release-16595-$pin"
+            "$HOME/.elan/bin/elan" run "leanprover/lean4-pr-releases:pr-release-16595-$pin" lean --version > "evidence-run/oracle-$pin.txt"
+            grep -q "$pin" "evidence-run/oracle-$pin.txt"
+          done
+      - name: Replay upstream witness, same-name and distinct-name variants, and protected cohorts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,copy,hashlib,io,json,os,pathlib,subprocess,tarfile,zipfile
+          O=pathlib.Path('evidence-run')
+          def digest(raw):return hashlib.sha256(raw).hexdigest()
+          def archive(raw):
+              z=zipfile.ZipFile(io.BytesIO(raw));assert z.testzip() is None;return z
+          def inputs(raw):
+              z=archive(raw)
+              with tarfile.open(fileobj=io.BytesIO(z.read('lean-arena-tests.tar.gz'))) as t:
+                  return {m.name.split('/',1)[1].removesuffix('.ndjson'):t.extractfile(m).read() for m in t.getmembers() if m.isfile() and m.name.endswith('.ndjson')}
+          def save(name,val):(O/name).write_text(json.dumps(val,indent=2,sort_keys=True)+'\n')
+          def decode(raw):return [json.loads(x) for x in raw.splitlines()]
+          def encode(rows):return ''.join(json.dumps(r,separators=(',',':'),ensure_ascii=False)+'\n' for r in rows).encode()
+          env={k:v for k,v in os.environ.items() if not k.startswith(('NUCLEUS_','METATRON_'))}
+          env.update(json.loads(pathlib.Path('arena-flags.json').read_text()))
+          def run(raw,which):
+              if len(raw)>10*1024*1024:return 2,'input byte allowance'
+              p=subprocess.run([str((O/which).resolve())],input=raw,capture_output=True,env=env,timeout=120)
+              return p.returncode,p.stderr.decode(errors='replace')
+          parent=archive((O/'projection.zip').read_bytes())
+          z=archive(parent.read('census.zip'))
+          q=archive(z.read('qualified.zip'))
+          pk=archive(q.read('base.zip'));k=archive(pk.read('base.zip'));identity=archive(k.read('base.zip'))
+          iota=archive(identity.read('base.zip'));composition=archive(iota.read('composition.zip'));ordinary=archive(composition.read('base.zip'));old=archive(ordinary.read('prior-qualification.zip'))
+          cohorts={key:(data,{r['name']:r for r in json.loads(parent.read(key+'-rows.json'))}) for key,data in {
+            'preview':inputs(z.read('corpus.zip')),
+            'current':inputs(ordinary.read('test-tarball.zip')),
+            'prior':inputs(old.read('tarball.zip'))
+          }.items()}
+          # Independent typed-field projection alias generator. Append the
+          # alias after all names and before the chosen projection, shifting
+          # later name IDs only if necessary; all expression IDs unchanged.
+          def map_names(rows,m,project_override=None):
+              for r in rows:
+                  if 'in' in r:
+                      r['in']=m(r['in'])
+                      r['str' if 'str' in r else 'num']['pre']=m(r['str' if 'str' in r else 'num']['pre'])
+                  elif 'param' in r and 'il' in r:r['param']=m(r['param'])
+                  elif 'const' in r:r['const']['name']=m(r['const']['name'])
+                  elif 'proj' in r:r['proj']['typeName']=m(r['proj']['typeName'])
+                  elif any(t in r for t in ('forallE','lam','letE')):
+                      next(r[t] for t in ('forallE','lam','letE') if t in r)['name']=m(next(r[t] for t in ('forallE','lam','letE') if t in r)['name'])
+                  elif 'inductive' in r:
+                      b=r['inductive']
+                      for group in ('types','ctors','recs'):
+                          for item in b[group]:
+                              for f in ('name','induct'):
+                                  if f in item:item[f]=m(item[f])
+                              for f in ('all','ctors','levelParams'):
+                                  if f in item:item[f]=[m(n) for n in item[f]]
+                              for rule in item.get('rules',[]):rule['ctor']=m(rule['ctor'])
+                  elif 'def' in r or 'thm' in r:
+                      d=r.get('def',r.get('thm'));d['name']=m(d['name'])
+                      for f in ('all','levelParams'):d[f]=[m(n) for n in d[f]]
+              return rows
+          def alias_variant(raw,wrong=False,wrong_idx=False,distinct_prefix=False,alias_count=1,unused_alias=False):
+              rows=decode(raw)
+              pos=next(i for i,r in enumerate(rows) if 'proj' in r)
+              proj=rows[pos]
+              old_name=proj['proj']['typeName']
+              source=next(r for r in rows if r.get('in')==old_name)
+              if wrong:
+                  owner=next(t for r in rows if 'inductive' in r for t in r['inductive']['types'] if t['name']==old_name)
+                  source=next(r for r in rows if r.get('in')==owner['ctors'][0])
+              new_id=max(r['in'] for r in rows[:pos] if 'in' in r)+1
+              map_names(rows,lambda n:n+alias_count if n>=new_id else n)
+              copies=[]
+              for i in range(alias_count):
+                  a=copy.deepcopy(source);a['in']=new_id+i
+                  if distinct_prefix:a['str']['pre']=old_name
+                  copies.append(a)
+              rows[pos:pos]=copies
+              if not unused_alias:
+                  proj['proj']['typeName']=new_id
+                  if alias_count>1:
+                      second=next(r for r in rows[pos+alias_count+1:] if 'proj' in r)
+                      second['proj']['typeName']=new_id+1
+              if wrong_idx:proj['proj']['idx']=999
+              return encode(rows)
+          raw=(O/'upstream.ndjson').read_bytes()
+          ur=decode(raw)
+          assert ur[0]['meta']['lean']['githash']=='8f3431ee714a7a96acf091678540b0e42e4e8423'
+          assert len(ur)==82
+          assert next(r for r in ur if r.get('in')==17)['str']==next(r for r in ur if r.get('in')==1)['str']
+          # Exact deduplication counterpart, no schema/header relabeling.
+          canonical=encode(map_names([r for r in ur if r.get('in')!=17],lambda n:1 if n==17 else n-1 if n>17 else n))
+          wrong_up=decode(raw)
+          next(r['proj'] for r in wrong_up if r.get('proj',{}).get('typeName')==17)['typeName']=3
+          base=cohorts['preview'][0]['tutorial/084_Prod.snd']
+          fixtures=[
+            ('upstream-exact',raw,'8f3431e',0,False),
+            ('upstream-deduplicated',canonical,'8f3431e',0,False),
+            ('upstream-wrong-family',encode(wrong_up),'8f3431e',1,False),
+            ('preview-original',base,'a8ad4db',0,True),
+            ('preview-alias',alias_variant(base),'a8ad4db',0,True),
+            ('preview-two-aliases',alias_variant(base,alias_count=2),'a8ad4db',0,True),
+            ('preview-alias-wrong-family',alias_variant(base,wrong=True),'a8ad4db',1,True),
+            ('preview-same-suffix-different-prefix',alias_variant(base,distinct_prefix=True),'a8ad4db',1,True),
+            ('preview-alias-invalid-field',alias_variant(base,wrong_idx=True),'a8ad4db',1,True),
+            ('preview-unused-alias-policy',alias_variant(base,unused_alias=True),'a8ad4db',0,False),
+          ]
+          d=O/'controls';d.mkdir();controls=[]
+          for name,data,pin,expected,required in fixtures:
+              p=d/(name+'.ndjson');p.write_bytes(data)
+              pr6,perr=run(data,'pr6');before,berr=run(data,'baseline');after,err=run(data,'candidate')
+              native=subprocess.run(['elan','run','leanprover/lean4-pr-releases:pr-release-16595-'+pin,'leanchecker','--from-export',str(p)],capture_output=True,timeout=120)
+              item={'name':name,'sha256':digest(data),'pin':pin,'pr6':pr6,'before':before,'exit':after,'expected':expected,'official':native.returncode,'official_stdout':native.stdout.decode(errors='replace'),'official_stderr':native.stderr.decode(errors='replace'),'stderr':err}
+              controls.append(item);save('controls.json',controls);print('CONTROL',json.dumps(item),flush=True)
+              assert native.returncode==expected,item
+              assert after in (expected,2),item
+              if required and expected==0:assert after==0,item
+              if name in ('preview-alias','preview-two-aliases'):assert before==2,item
+              if name=='preview-unused-alias-policy':assert after==2,item
+          summaries={};violations=[]
+          for cohort,(ins,previous) in cohorts.items():
+              assert len(ins)==356 and set(ins)==set(previous),cohort
+              records=[]
+              for name,data in ins.items():
+                  row=previous[name];assert digest(data)==row['sha256'],name
+                  before,_=run(data,'baseline');after,err=run(data,'candidate')
+                  allowed=before==2 and after==0 and row['expected']=='accept'
+                  if before!=row['exit'] or (after!=before and not allowed):
+                      violations.append((cohort,name,before,after,row['exit'],row['expected']))
+                  records.append({'name':name,'sha256':digest(data),'expected':row['expected'],'before':before,'exit':after,'stderr':err})
+              summary={'count':len(records),'counts':dict(collections.Counter(r['exit'] for r in records)),'changes':[r for r in records if r['before']!=r['exit']]}
+              save(cohort+'-rows.json',records);summaries[cohort]=summary
+              print('COHORT',cohort,json.dumps(summary),flush=True)
+          save('summary.json',summaries);save('violations.json',violations)
+          assert not violations,violations
+          print('PROJECTION_NAME_IDENTITY_QUALIFIED_BOUNDED',flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nucleus-native32-projection-name-identity
+          path: evidence-run/
+          retention-days: 60
